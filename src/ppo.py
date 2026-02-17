@@ -343,12 +343,15 @@ def ppo_update_drd(
             # Weight smoothness penalty (via agent method)
             smoothness_loss = agent.weight_smoothness_loss(new_weights.unsqueeze(0))
 
-            # Weight-reward alignment loss: REINFORCE-style gradient for weights.
-            # Compute differentiable effective reward using new weights, then
-            # weight by advantages — this trains the weight network to prioritize
-            # sub-rewards that correlate with good outcomes.
+            # Weight prediction loss: train the weight network to produce weights
+            # where the weighted sub-reward predicts the advantage direction.
+            # In Regime A, safety penalties drive advantages → learns to upweight safety.
+            # In Regime B, step costs drive advantages → learns to upweight efficiency.
+            # This avoids the collapse of the old REINFORCE-style alignment loss.
             new_r_eff = (new_weights * sub_rews_t).sum(dim=-1)  # (seq_len,)
-            weight_reward_loss = -(new_r_eff * adv_t.detach()).mean()
+            # Normalize advantages to match r_eff scale
+            adv_normalized = (adv_t.detach() - adv_t.detach().mean()) / (adv_t.detach().std() + 1e-8)
+            weight_reward_loss = nn.functional.mse_loss(new_r_eff, adv_normalized)
 
             loss = (
                 policy_loss

@@ -6,7 +6,7 @@ class EnvConfig:
     grid_size: int = 10
     regime_switch_interval: int = 50
     max_episode_steps: int = 200
-    hazard_penalty_full: float = -5.0
+    hazard_penalty_full: float = -1.0
     hazard_penalty_reduced: float = -0.02
     step_cost_base: float = -0.01
     step_cost_ramp: float = -0.005
