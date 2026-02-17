@@ -84,10 +84,11 @@ class WeightNetwork(nn.Module):
             nn.Linear(weight_hidden, num_sub_rewards),
         )
         # Warm-start: set bias so initial output ≈ softmax(init_logits).
-        # Keep default weight init at full scale so the network remains
-        # sensitive to GRU hidden state variations from the start.
+        # Scale weights to 0.5x — enough input sensitivity for regime
+        # differentiation while keeping the warm-start stable.
         if init_logits is not None:
             with torch.no_grad():
+                self.net[-1].weight.mul_(0.5)
                 self.net[-1].bias.copy_(init_logits)
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
@@ -115,18 +116,17 @@ class DRDAgent(nn.Module):
     ):
         super().__init__()
         self.config = config
-        # NOTE: Policy sees state only, NOT the GRU hidden state. This is intentional
-        # ("Option A / coach" architecture): the policy is blind to trajectory context.
-        # Adaptation comes entirely through the effective reward signal shifting as the
-        # weight network re-prioritizes sub-rewards based on GRU-encoded history.
-        self.policy = PolicyNetwork(config.state_dim, config.action_dim, config.policy_hidden)
         self.gru = GRUHistoryEncoder(config.gru_input_dim, config.gru_hidden_dim)
+        # Policy takes state + GRU hidden so it can learn regime-dependent behavior.
+        # The weight network also conditions on GRU hidden for reward weighting.
+        self.policy = PolicyNetwork(
+            config.state_dim + config.gru_hidden_dim, config.action_dim, config.policy_hidden
+        )
         self.weight_net = WeightNetwork(
             config.gru_hidden_dim, config.num_sub_rewards, config.weight_hidden,
             init_logits=init_weight_logits,
             min_weight=min_weight,
         )
-        # Value network takes state + gru hidden
         self.value_net = ValueNetwork(config.state_dim + config.gru_hidden_dim, config.value_hidden)
 
     def init_hidden(self, batch_size: int, device: torch.device) -> torch.Tensor:
@@ -155,12 +155,12 @@ class DRDAgent(nn.Module):
         gru_out, h_new = self.gru.forward_step(gru_input, h)
 
         weights = self.weight_net(gru_out)
-        dist = self.policy(state)
+        policy_input = torch.cat([state, gru_out], dim=-1)
+        dist = self.policy(policy_input)
         action = dist.sample()
         log_prob = dist.log_prob(action)
 
-        value_input = torch.cat([state, gru_out], dim=-1)
-        value = self.value_net(value_input)
+        value = self.value_net(policy_input)
 
         return action, log_prob, value, h_new, weights
 
@@ -192,14 +192,14 @@ class DRDAgent(nn.Module):
 
         flat_states = states.reshape(-1, self.config.state_dim)
         flat_gru = gru_out.reshape(-1, self.config.gru_hidden_dim)
+        policy_input = torch.cat([flat_states, flat_gru], dim=-1)
 
-        dists = self.policy(flat_states)
+        dists = self.policy(policy_input)
         flat_actions = actions.reshape(-1)
         log_probs = dists.log_prob(flat_actions).reshape(batch, seq_len)
         entropy = dists.entropy().reshape(batch, seq_len)
 
-        value_input = torch.cat([flat_states, flat_gru], dim=-1)
-        values = self.value_net(value_input).reshape(batch, seq_len)
+        values = self.value_net(policy_input).reshape(batch, seq_len)
 
         return log_probs, values, entropy, weights
 
