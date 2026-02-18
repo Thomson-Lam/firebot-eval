@@ -412,10 +412,20 @@ def train_layer2(config: ExperimentConfig, best_static_weights: np.ndarray | Non
     device = torch.device(config.train.device)
     env = RegimeSwitchingGridWorld(config.env)
 
-    # Warm-start weight network: compute logits so softmax ≈ best_static_weights
-    # log(w) shifted to have mean 0 gives the right softmax output
-    log_w = np.log(best_static_weights + 1e-8)
-    init_logits = torch.tensor(log_w - log_w.mean(), dtype=torch.float32)
+    # Warm-start weight network: compute hierarchical init logits
+    # logit[0] → sigmoid → progress_share ∈ [0.2, 0.8]
+    # logit[1] → sigmoid → safety_frac ∈ [floor, 1-floor]
+    p = float(best_static_weights[0])
+    p_sigmoid = np.clip((p - 0.2) / 0.6, 0.01, 0.99)
+    logit_progress = float(np.log(p_sigmoid / (1 - p_sigmoid)))
+
+    remaining = 1.0 - p
+    safety_frac = float(best_static_weights[1]) / (remaining + 1e-8)
+    floor = config.train.min_weight
+    sf_sigmoid = np.clip((safety_frac - floor) / (1 - 2 * floor), 0.01, 0.99)
+    logit_safety = float(np.log(sf_sigmoid / (1 - sf_sigmoid)))
+
+    init_logits = torch.tensor([logit_progress, logit_safety], dtype=torch.float32)
     agent = DRDAgent(config.net, init_weight_logits=init_logits, min_weight=config.train.min_weight).to(device)
     normalizer = RunningNormalizer(config.net.num_sub_rewards)
     buffer = RolloutBuffer()
@@ -485,11 +495,36 @@ def train_layer2(config: ExperimentConfig, best_static_weights: np.ndarray | Non
 
         if (update + 1) % 10 == 0:
             recent = all_returns[-20:] if all_returns else [0]
+            rcl = losses.get("regime_cls_loss", 0)
+            regime_acc_approx = max(0, 1.0 - rcl / 0.693)
+
+            # Per-regime sub-reward means
+            sub_rews_arr = np.array(buffer.sub_rewards)
+            sr_a = np.mean(sub_rews_arr[regime_a_mask], axis=0) if regime_a_mask.any() else np.zeros(3)
+            sr_b = np.mean(sub_rews_arr[regime_b_mask], axis=0) if regime_b_mask.any() else np.zeros(3)
+
+            # Goal reach rate
+            goals = sum(1 for d, r in zip(buffer.dones, buffer.regimes) if d)
+            goal_rate = sum(1 for i, d in enumerate(buffer.dones) if d and i + 1 < len(buffer.states)) / max(goals, 1)
+
+            # Direction vector from loss computation
+            d_p = losses.get("direction_progress", 0)
+            d_s = losses.get("direction_safety", 0)
+            d_e = losses.get("direction_efficiency", 0)
+            wdl = losses.get("weight_directed_loss", 0)
+
             print(
-                f"  [DRD {phase}] step {global_step}: mean_return={np.mean(recent):.2f} "
-                f"w=[{mean_weights[0]:.2f}, {mean_weights[1]:.2f}, {mean_weights[2]:.2f}] "
-                f"A=[{mean_w_a[0]:.2f}, {mean_w_a[1]:.2f}, {mean_w_a[2]:.2f}] "
-                f"B=[{mean_w_b[0]:.2f}, {mean_w_b[1]:.2f}, {mean_w_b[2]:.2f}]"
+                f"  [DRD {phase}] step {global_step}: ret={np.mean(recent):.2f} "
+                f"w=[{mean_weights[0]:.2f},{mean_weights[1]:.2f},{mean_weights[2]:.2f}] "
+                f"A=[{mean_w_a[0]:.2f},{mean_w_a[1]:.2f},{mean_w_a[2]:.2f}] "
+                f"B=[{mean_w_b[0]:.2f},{mean_w_b[1]:.2f},{mean_w_b[2]:.2f}] "
+                f"rcl={rcl:.3f}({regime_acc_approx:.0%})"
+            )
+            print(
+                f"           dir=[{d_p:+.2f},{d_s:+.2f},{d_e:+.2f}] wdl={wdl:.4f} "
+                f"sr_A=[{sr_a[0]:.3f},{sr_a[1]:.3f},{sr_a[2]:.3f}] "
+                f"sr_B=[{sr_b[0]:.3f},{sr_b[1]:.3f},{sr_b[2]:.3f}] "
+                f"goals={goals}"
             )
 
     _wandb_finish(config.train.use_wandb)

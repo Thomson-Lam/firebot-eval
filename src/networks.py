@@ -65,7 +65,17 @@ class GRUHistoryEncoder(nn.Module):
 
 
 class WeightNetwork(nn.Module):
-    """Maps GRU hidden state to sub-reward weights on the simplex."""
+    """Maps GRU hidden state to sub-reward weights via hierarchical parameterization.
+
+    Two separate heads (no shared parameters):
+      progress_head: h → logit → sigmoid → progress_share ∈ [0.2, 0.8]
+      safety_head:   h → logit → sigmoid → safety_frac ∈ [floor, 1-floor]
+
+    Final weights: [progress, (1-progress)*safety_frac, (1-progress)*(1-safety_frac)]
+
+    Separate heads prevent contrastive gradient (on safety/efficiency) from
+    leaking into progress via shared hidden layer parameters.
+    """
 
     def __init__(
         self,
@@ -76,33 +86,37 @@ class WeightNetwork(nn.Module):
         min_weight: float = 0.0,
     ):
         super().__init__()
-        self.min_weight = min_weight
+        self.min_weight = min_weight  # floor for safety/efficiency fraction
         self.num_sub_rewards = num_sub_rewards
-        self.net = nn.Sequential(
-            nn.Linear(hidden_dim, weight_hidden),
-            nn.ReLU(),
-            nn.Linear(weight_hidden, num_sub_rewards),
-        )
-        # Warm-start: set bias so initial output ≈ softmax(init_logits).
-        # Scale weights to 0.5x — enough input sensitivity for regime
-        # differentiation while keeping the warm-start stable.
+        # Separate heads: no shared parameters between progress and safety_frac
+        self.progress_head = nn.Linear(hidden_dim, 1)
+        self.safety_head = nn.Linear(hidden_dim, 1)
+
+        # Warm-start: set biases, scale weights for stability
         if init_logits is not None:
             with torch.no_grad():
-                self.net[-1].weight.mul_(0.5)
-                self.net[-1].bias.copy_(init_logits)
+                self.progress_head.weight.mul_(0.5)
+                self.progress_head.bias.fill_(init_logits[0].item())
+                self.safety_head.weight.mul_(0.5)
+                self.safety_head.bias.fill_(init_logits[1].item())
 
     def forward(self, h: torch.Tensor) -> torch.Tensor:
-        """h: (batch, hidden_dim) -> weights: (batch, num_sub_rewards), sums to 1.
+        """h: (batch, hidden_dim) -> weights: (batch, 3), sums to 1."""
+        # Progress share: bounded [0.2, 0.8]
+        progress = torch.sigmoid(self.progress_head(h).squeeze(-1)) * 0.6 + 0.2
 
-        Applies a minimum weight floor to prevent collapse, then renormalizes.
-        """
-        raw = torch.softmax(self.net(h), dim=-1)
-        if self.min_weight > 0:
-            # Mix with uniform: w' = (1 - k*min) * softmax + min
-            floor = self.min_weight
-            k = self.num_sub_rewards
-            raw = raw * (1 - k * floor) + floor
-        return raw
+        # Safety fraction of remaining budget: bounded [floor, 1-floor]
+        floor = self.min_weight
+        raw_frac = torch.sigmoid(self.safety_head(h).squeeze(-1))
+        safety_frac = raw_frac * (1 - 2 * floor) + floor
+
+        # Detach progress so contrastive gradient on safety/efficiency can't
+        # flow back to progress_head through the (1 - progress) term.
+        remaining = 1.0 - progress.detach()
+        safety = remaining * safety_frac
+        efficiency = remaining * (1.0 - safety_frac)
+
+        return torch.stack([progress, safety, efficiency], dim=-1)
 
 
 class DRDAgent(nn.Module):
@@ -128,6 +142,10 @@ class DRDAgent(nn.Module):
             min_weight=min_weight,
         )
         self.value_net = ValueNetwork(config.state_dim + config.gru_hidden_dim, config.value_hidden)
+        # Auxiliary regime classifier: GRU hidden -> regime prediction (A=0, B=1).
+        # Trained with privileged regime labels during training to force the GRU
+        # to encode regime information, even when the policy avoids hazards.
+        self.regime_classifier = nn.Linear(config.gru_hidden_dim, 1)
 
     def init_hidden(self, batch_size: int, device: torch.device) -> torch.Tensor:
         return self.gru.init_hidden(batch_size, device)
@@ -171,11 +189,12 @@ class DRDAgent(nn.Module):
         prev_actions: torch.Tensor,
         prev_sub_rewards: torch.Tensor,
         h_init: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Evaluate a sequence for PPO update.
 
         All inputs: (batch, seq_len, ...) except h_init: (1, batch, hidden).
-        Returns (log_probs, values, entropy, weights) each (batch, seq_len, ...).
+        Returns (log_probs, values, entropy, weights, regime_logits)
+        each (batch, seq_len, ...).
         """
         batch, seq_len = states.shape[:2]
 
@@ -186,12 +205,15 @@ class DRDAgent(nn.Module):
         ).reshape(batch, seq_len, -1)
 
         gru_out, _ = self.gru(gru_inputs, h_init)  # (batch, seq_len, hidden)
+        flat_gru = gru_out.reshape(-1, self.config.gru_hidden_dim)
 
-        weights = self.weight_net(gru_out.reshape(-1, self.config.gru_hidden_dim))
+        weights = self.weight_net(flat_gru)
         weights = weights.reshape(batch, seq_len, self.config.num_sub_rewards)
 
+        # Regime classifier: predict regime from GRU hidden state
+        regime_logits = self.regime_classifier(flat_gru).reshape(batch, seq_len)
+
         flat_states = states.reshape(-1, self.config.state_dim)
-        flat_gru = gru_out.reshape(-1, self.config.gru_hidden_dim)
         policy_input = torch.cat([flat_states, flat_gru], dim=-1)
 
         dists = self.policy(policy_input)
@@ -201,7 +223,7 @@ class DRDAgent(nn.Module):
 
         values = self.value_net(policy_input).reshape(batch, seq_len)
 
-        return log_probs, values, entropy, weights
+        return log_probs, values, entropy, weights, regime_logits
 
     def weight_smoothness_loss(self, weights: torch.Tensor) -> torch.Tensor:
         """Penalize rapid weight changes between consecutive timesteps.
@@ -217,7 +239,10 @@ class DRDAgent(nn.Module):
         return {
             "policy": torch.optim.Adam(self.policy.parameters(), lr=ppo_config.lr_policy),
             "value": torch.optim.Adam(self.value_net.parameters(), lr=ppo_config.lr_value),
-            "gru": torch.optim.Adam(self.gru.parameters(), lr=ppo_config.lr_value),
+            "gru": torch.optim.Adam(
+                list(self.gru.parameters()) + list(self.regime_classifier.parameters()),
+                lr=ppo_config.lr_value,
+            ),
             "weight": torch.optim.Adam(self.weight_net.parameters(), lr=ppo_config.lr_weight),
         }
 

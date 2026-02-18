@@ -296,16 +296,18 @@ def ppo_update_drd(
     old_lp_arr = np.array(buffer.log_probs)
     prev_actions_arr = np.array(buffer.prev_actions)
     prev_sub_rews_arr = np.array(buffer.prev_sub_rewards)
-
-    # Pre-normalize sub-rewards for the weight-reward alignment loss
-    sub_rews_normed = normalizer.normalize(sub_rews)
+    # Regime labels: A=0, B=1 for binary classification
+    regime_labels = np.array([1.0 if r == "B" else 0.0 for r in buffer.regimes], dtype=np.float32)
 
     optimizers = agent.get_optimizers(ppo_config)
     total_policy_loss = 0.0
     total_value_loss = 0.0
     total_entropy = 0.0
     total_smoothness = 0.0
-    total_weight_reward = 0.0
+    total_regime_cls = 0.0
+    total_weight_directed = 0.0
+    direction_accum = np.zeros(3, dtype=np.float64)
+    direction_count = 0
     num_updates = 0
 
     for _ in range(ppo_config.num_epochs):
@@ -321,17 +323,18 @@ def ppo_update_drd(
             old_lp_t = torch.tensor(old_lp_arr[s:e], dtype=torch.float32, device=device)
             adv_t = torch.tensor(advantages[s:e], dtype=torch.float32, device=device)
             ret_t = torch.tensor(returns[s:e], dtype=torch.float32, device=device)
-            sub_rews_t = torch.tensor(sub_rews_normed[s:e], dtype=torch.float32, device=device)
+            regime_t = torch.tensor(regime_labels[s:e], dtype=torch.float32, device=device)
 
             h_init = buffer.gru_hiddens[s].to(device)
 
-            log_probs, values, entropy, new_weights = agent.evaluate(
+            log_probs, values, entropy, new_weights, regime_logits = agent.evaluate(
                 states_t, actions_t, prev_act_t, prev_sr_t, h_init
             )
             log_probs = log_probs.squeeze(0)
             values = values.squeeze(0)
             entropy = entropy.squeeze(0)
             new_weights = new_weights.squeeze(0)  # (seq_len, k)
+            regime_logits = regime_logits.squeeze(0)  # (seq_len,)
 
             ratio = torch.exp(log_probs - old_lp_t)
             surr1 = ratio * adv_t
@@ -340,25 +343,59 @@ def ppo_update_drd(
             value_loss = nn.functional.mse_loss(values, ret_t)
             entropy_loss = -entropy.mean()
 
-            # Weight smoothness penalty (via agent method)
+            # Weight smoothness penalty
             smoothness_loss = agent.weight_smoothness_loss(new_weights.unsqueeze(0))
 
-            # Weight prediction loss: train the weight network to produce weights
-            # where the weighted sub-reward predicts the advantage direction.
-            # In Regime A, safety penalties drive advantages → learns to upweight safety.
-            # In Regime B, step costs drive advantages → learns to upweight efficiency.
-            # This avoids the collapse of the old REINFORCE-style alignment loss.
-            new_r_eff = (new_weights * sub_rews_t).sum(dim=-1)  # (seq_len,)
-            # Normalize advantages to match r_eff scale
-            adv_normalized = (adv_t.detach() - adv_t.detach().mean()) / (adv_t.detach().std() + 1e-8)
-            weight_reward_loss = nn.functional.mse_loss(new_r_eff, adv_normalized)
+            # Auxiliary regime classification loss: forces the GRU to encode
+            # regime information using privileged labels during training.
+            regime_cls_loss = nn.functional.binary_cross_entropy_with_logits(
+                regime_logits, regime_t
+            )
+
+            # Directed contrastive on SAFETY and EFFICIENCY only (indices 1,2).
+            # Progress (index 0) is excluded: its importance is similar in both
+            # regimes under a healthy policy, and including it creates a feedback
+            # loop (high safety weight in A → agent stops moving → progress drops
+            # in A → direction says "progress belongs in B" → collapse).
+            # Safety/efficiency have robust regime-dependent signals: barrier
+            # guarantees safety hits in A; step cost ramps in B regardless of policy.
+            mask_a = (regime_t < 0.5)
+            mask_b = (regime_t > 0.5)
+            if mask_a.any() and mask_b.any():
+                sub_rews_chunk = torch.tensor(
+                    sub_rews[s:e], dtype=torch.float32, device=device
+                )
+                # Per-regime importance: |mean| + std for each component
+                mean_a = sub_rews_chunk[mask_a].mean(dim=0)
+                std_a = sub_rews_chunk[mask_a].std(dim=0) + 1e-8
+                imp_a = mean_a.abs() + std_a  # (k,)
+
+                mean_b = sub_rews_chunk[mask_b].mean(dim=0)
+                std_b = sub_rews_chunk[mask_b].std(dim=0) + 1e-8
+                imp_b = mean_b.abs() + std_b  # (k,)
+
+                # Full direction (for logging)
+                direction = (imp_a - imp_b) / (imp_a + imp_b + 1e-8)  # (k,)
+                direction_accum += direction.detach().cpu().numpy()
+                direction_count += 1
+
+                # Only apply contrastive to safety (1) and efficiency (2)
+                direction_se = direction[1:]  # (2,)
+                mean_w_a = new_weights[mask_a].mean(dim=0)  # (k,)
+                mean_w_b = new_weights[mask_b].mean(dim=0)  # (k,)
+                w_diff_se = (mean_w_a - mean_w_b)[1:]  # (2,)
+
+                weight_directed_loss = -(w_diff_se * direction_se.detach()).sum()
+            else:
+                weight_directed_loss = torch.tensor(0.0, device=device)
 
             loss = (
                 policy_loss
                 + ppo_config.value_coef * value_loss
                 + ppo_config.entropy_coef * entropy_loss
                 + train_config.smoothness_lambda * smoothness_loss
-                + train_config.weight_reward_coef * weight_reward_loss
+                + train_config.regime_cls_coef * regime_cls_loss
+                + train_config.weight_reward_coef * weight_directed_loss
             )
 
             for opt in optimizers.values():
@@ -368,7 +405,7 @@ def ppo_update_drd(
 
             optimizers["policy"].step()
             optimizers["value"].step()
-            optimizers["gru"].step()  # GRU always learns (value loss provides gradient)
+            optimizers["gru"].step()  # GRU always learns (value + regime cls gradients)
             if not freeze_weights:
                 optimizers["weight"].step()
 
@@ -376,14 +413,20 @@ def ppo_update_drd(
             total_value_loss += value_loss.item()
             total_entropy += -entropy_loss.item()
             total_smoothness += smoothness_loss.item()
-            total_weight_reward += weight_reward_loss.item()
+            total_regime_cls += regime_cls_loss.item()
+            total_weight_directed += weight_directed_loss.item()
             num_updates += 1
 
     n = max(num_updates, 1)
+    avg_direction = direction_accum / max(direction_count, 1)
     return {
         "policy_loss": total_policy_loss / n,
         "value_loss": total_value_loss / n,
         "entropy": total_entropy / n,
         "smoothness_loss": total_smoothness / n,
-        "weight_reward_loss": total_weight_reward / n,
+        "regime_cls_loss": total_regime_cls / n,
+        "weight_directed_loss": total_weight_directed / n,
+        "direction_progress": avg_direction[0],
+        "direction_safety": avg_direction[1],
+        "direction_efficiency": avg_direction[2],
     }

@@ -46,20 +46,38 @@ class RegimeSwitchingGridWorld(gym.Env):
         return 4
 
     def _place_hazards(self) -> set[tuple[int, int]]:
-        """Place hazard cells along center/diagonal to force routing decisions."""
+        """Place hazards with a barrier forcing unavoidable hazard crossings.
+
+        A horizontal barrier at the grid midpoint spans all columns. The agent
+        must cross it to reach the goal, ensuring regime-dependent sub-reward
+        patterns (safety penalty in A, free passage in B) on every episode.
+        Remaining hazard budget is scattered along center/diagonal.
+        """
         c = self.config
-        candidates = []
-        for i in range(c.grid_size):
-            for j in range(c.grid_size):
-                if (i, j) == (0, 0) or (i, j) == (c.grid_size - 1, c.grid_size - 1):
-                    continue
-                # Favor center and diagonal cells
-                center_dist = abs(i - c.grid_size / 2) + abs(j - c.grid_size / 2)
-                diag_dist = abs(i - j)
-                if center_dist < c.grid_size * 0.4 or diag_dist < 2:
-                    candidates.append((i, j))
-        self._rng.shuffle(candidates)
-        return set(candidates[: c.num_hazard_cells])
+        hazards: set[tuple[int, int]] = set()
+
+        mid = c.grid_size // 2
+        for j in range(c.grid_size):
+            cell = (mid, j)
+            if cell != (0, 0) and cell != (c.grid_size - 1, c.grid_size - 1):
+                hazards.add(cell)
+
+        remaining = c.num_hazard_cells - len(hazards)
+        if remaining > 0:
+            candidates = []
+            for i in range(c.grid_size):
+                for j in range(c.grid_size):
+                    if (i, j) in hazards or (i, j) == (0, 0) or (i, j) == (c.grid_size - 1, c.grid_size - 1):
+                        continue
+                    center_dist = abs(i - c.grid_size / 2) + abs(j - c.grid_size / 2)
+                    diag_dist = abs(i - j)
+                    if center_dist < c.grid_size * 0.4 or diag_dist < 2:
+                        candidates.append((i, j))
+            self._rng.shuffle(candidates)
+            for cell in candidates[:remaining]:
+                hazards.add(cell)
+
+        return hazards
 
     def _manhattan(self, pos: tuple[int, int]) -> int:
         return abs(pos[0] - self.goal[0]) + abs(pos[1] - self.goal[1])

@@ -7,7 +7,7 @@ class EnvConfig:
     regime_switch_interval: int = 50
     max_episode_steps: int = 200
     hazard_penalty_full: float = -1.0
-    hazard_penalty_reduced: float = -0.02
+    hazard_penalty_reduced: float = 0.0
     step_cost_base: float = -0.01
     step_cost_ramp: float = -0.005
     goal_reward: float = 1.0
@@ -32,7 +32,7 @@ class NetworkConfig:
 class PPOConfig:
     lr_policy: float = 3e-4
     lr_value: float = 1e-3
-    lr_weight: float = 5e-5
+    lr_weight: float = 1e-5
     gamma: float = 0.99
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
@@ -42,16 +42,17 @@ class PPOConfig:
     num_epochs: int = 4
     batch_size: int = 64
     rollout_length: int = 2048
-    chunk_length: int = 16
+    chunk_length: int = 64
 
 
 @dataclass
 class TrainConfig:
     total_timesteps: int = 500_000
     pretrain_timesteps: int = 100_000
-    smoothness_lambda: float = 0.5
-    weight_reward_coef: float = 0.05
-    min_weight: float = 0.05
+    smoothness_lambda: float = 0.1
+    weight_reward_coef: float = 0.3
+    regime_cls_coef: float = 0.1
+    min_weight: float = 0.10
     eval_interval: int = 10_000
     eval_episodes: int = 20
     seed: int = 42
