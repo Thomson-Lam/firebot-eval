@@ -159,6 +159,87 @@ def ppo_update_static(
     }
 
 
+def ppo_update_oracle(
+    agent,
+    buffer: RolloutBuffer,
+    weights_a: np.ndarray,
+    weights_b: np.ndarray,
+    normalizer: RunningNormalizer,
+    ppo_config: PPOConfig,
+    device: torch.device,
+) -> dict[str, float]:
+    """PPO update for oracle agent with per-regime weights."""
+    T = len(buffer)
+    sub_rews = np.array(buffer.sub_rewards)
+    normalizer.update(sub_rews)
+
+    # Per-step weights based on true regime
+    weights_arr = np.array([
+        weights_a if r == "A" else weights_b for r in buffer.regimes
+    ], dtype=np.float32)
+    eff_rewards = compute_effective_rewards(sub_rews, weights_arr, normalizer)
+
+    values_arr = np.array(buffer.values)
+    dones_arr = np.array(buffer.dones, dtype=np.float32)
+    last_val = 0.0
+
+    advantages, returns = compute_gae(
+        eff_rewards, values_arr, dones_arr, last_val,
+        ppo_config.gamma, ppo_config.gae_lambda,
+    )
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+    states_t = torch.tensor(np.array(buffer.states), dtype=torch.float32, device=device)
+    actions_t = torch.tensor(buffer.actions, dtype=torch.long, device=device)
+    old_log_probs_t = torch.tensor(buffer.log_probs, dtype=torch.float32, device=device)
+    advantages_t = torch.tensor(advantages, dtype=torch.float32, device=device)
+    returns_t = torch.tensor(returns, dtype=torch.float32, device=device)
+
+    optimizers = agent.get_optimizers(ppo_config)
+    total_policy_loss = 0.0
+    total_value_loss = 0.0
+    total_entropy = 0.0
+    num_updates = 0
+
+    for _ in range(ppo_config.num_epochs):
+        indices = torch.randperm(T, device=device)
+        for start in range(0, T, ppo_config.batch_size):
+            end = min(start + ppo_config.batch_size, T)
+            idx = indices[start:end]
+
+            log_probs, values, entropy = agent.evaluate(states_t[idx], actions_t[idx])
+
+            ratio = torch.exp(log_probs - old_log_probs_t[idx])
+            adv = advantages_t[idx]
+
+            surr1 = ratio * adv
+            surr2 = torch.clamp(ratio, 1 - ppo_config.clip_eps, 1 + ppo_config.clip_eps) * adv
+            policy_loss = -torch.min(surr1, surr2).mean()
+
+            value_loss = nn.functional.mse_loss(values, returns_t[idx])
+            entropy_loss = -entropy.mean()
+
+            loss = policy_loss + ppo_config.value_coef * value_loss + ppo_config.entropy_coef * entropy_loss
+
+            for opt in optimizers.values():
+                opt.zero_grad()
+            loss.backward()
+            nn.utils.clip_grad_norm_(agent.parameters(), ppo_config.max_grad_norm)
+            for opt in optimizers.values():
+                opt.step()
+
+            total_policy_loss += policy_loss.item()
+            total_value_loss += value_loss.item()
+            total_entropy += -entropy_loss.item()
+            num_updates += 1
+
+    return {
+        "policy_loss": total_policy_loss / max(num_updates, 1),
+        "value_loss": total_value_loss / max(num_updates, 1),
+        "entropy": total_entropy / max(num_updates, 1),
+    }
+
+
 def ppo_update_recurrent(
     agent,
     buffer: RolloutBuffer,

@@ -13,6 +13,7 @@ from src.networks import DRDAgent, RecurrentStaticAgent, StaticWeightAgent
 from src.ppo import (
     RolloutBuffer,
     ppo_update_drd,
+    ppo_update_oracle,
     ppo_update_recurrent,
     ppo_update_static,
 )
@@ -322,6 +323,58 @@ def _train_recurrent_static(
     }
 
 
+def _train_oracle(
+    config: ExperimentConfig,
+    weights_a: np.ndarray,
+    weights_b: np.ndarray,
+    label: str,
+    log_fn,
+) -> dict:
+    """Train oracle agent with per-regime optimal weights (regime is known)."""
+    set_seed(config.train.seed)
+    device = torch.device(config.train.device)
+    env = RegimeSwitchingGridWorld(config.env)
+    agent = StaticWeightAgent(config.net).to(device)
+    normalizer = RunningNormalizer(config.net.num_sub_rewards)
+    buffer = RolloutBuffer()
+
+    obs = None
+    all_returns: list[float] = []
+    global_step = 0
+    num_updates = config.train.total_timesteps // config.ppo.rollout_length
+
+    for update in range(num_updates):
+        obs, stats = collect_rollout_static(
+            env, agent, buffer, config.ppo.rollout_length, device, obs
+        )
+        all_returns.extend(stats["episode_returns"])
+
+        losses = ppo_update_oracle(
+            agent, buffer, weights_a, weights_b, normalizer, config.ppo, device
+        )
+        global_step += config.ppo.rollout_length
+
+        metrics = {
+            **losses,
+            "mean_return": stats["mean_return"],
+            "mean_return_regime_A": np.mean(stats["regime_A_returns"]) if stats["regime_A_returns"] else 0,
+            "mean_return_regime_B": np.mean(stats["regime_B_returns"]) if stats["regime_B_returns"] else 0,
+        }
+        log_fn(label, metrics, global_step)
+
+        if (update + 1) % 10 == 0:
+            recent = all_returns[-20:] if all_returns else [0]
+            print(f"  [{label}] step {global_step}: mean_return={np.mean(recent):.2f}")
+
+    return {
+        "label": label,
+        "weights_a": weights_a,
+        "weights_b": weights_b,
+        "all_returns": all_returns,
+        "final_mean_return": np.mean(all_returns[-50:]) if len(all_returns) >= 50 else np.mean(all_returns) if all_returns else 0,
+    }
+
+
 # ── Layer 1: Baselines ───────────────────────────────────────────────────────
 
 
@@ -375,6 +428,20 @@ def train_layer1(config: ExperimentConfig) -> dict:
     )
     print(f"  Recurrent final mean return: {recurrent_result['final_mean_return']:.2f}")
 
+    # Oracle: uses per-regime optimal weights with known regime
+    # Keep progress high (matches best static), shift remaining budget
+    # Regime A (minefield): more safety weight
+    # Regime B (time pressure): more efficiency weight
+    oracle_weights_a = np.array([0.8, 0.15, 0.05], dtype=np.float32)
+    oracle_weights_b = np.array([0.8, 0.05, 0.15], dtype=np.float32)
+    print(f"\nTraining oracle (regime-aware) baseline...")
+    print(f"  A weights: {oracle_weights_a}, B weights: {oracle_weights_b}")
+    step_offset += config.train.total_timesteps
+    oracle_result = _train_oracle(
+        config, oracle_weights_a, oracle_weights_b, "oracle", log_fn
+    )
+    print(f"  Oracle final mean return: {oracle_result['final_mean_return']:.2f}")
+
     # Log summary table
     if config.train.use_wandb:
         try:
@@ -382,6 +449,7 @@ def train_layer1(config: ExperimentConfig) -> dict:
 
             summary = {r["label"]: r["final_mean_return"] for r in results}
             summary["recurrent"] = recurrent_result["final_mean_return"]
+            summary["oracle"] = oracle_result["final_mean_return"]
             summary["best_static_label"] = best["label"]
             wandb.summary.update(summary)
         except Exception:
@@ -393,6 +461,7 @@ def train_layer1(config: ExperimentConfig) -> dict:
         "static_results": results,
         "best_static": best,
         "recurrent_result": recurrent_result,
+        "oracle_result": oracle_result,
     }
 
 

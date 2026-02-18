@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import matplotlib
+matplotlib.use("Agg")  # non-interactive backend, no GUI window
+
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
