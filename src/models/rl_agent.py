@@ -4,7 +4,7 @@ rl_agent.py — PPO tactical agent inference interface.
 Loads the trained PPO model and returns tactical deployment waypoints
 for a given fire, converting grid coordinates back to real lat/lon.
 
-Usage (from API):
+Usage:
     from src.models.rl_agent import get_tactical_recommendations
     waypoints = get_tactical_recommendations("BC-2026-001", fire_data, spread_output)
 """
@@ -21,7 +21,7 @@ import numpy as np
 logger = logging.getLogger(__name__)
 
 MODEL_PATH = Path(__file__).parent / "tactical_ppo_agent.zip"
-GRID_SIZE = 50
+GRID_SIZE = 25
 
 
 def _grid_to_latlon(
@@ -30,13 +30,7 @@ def _grid_to_latlon(
     fire_center_lon: float,
     spread_radius_m: float,
 ) -> tuple[float, float]:
-    """
-    Convert a grid cell position to real-world lat/lon.
-    Grid cell (0,0) = NW corner, (GRID_SIZE-1, GRID_SIZE-1) = SE corner.
-    Fire center at grid cell (GRID_SIZE//2, GRID_SIZE//2).
-    Grid covers spread_radius_m * 2 in each direction.
-    """
-    # Degrees per metre (approximate, valid for BC/AB latitudes)
+    """Convert a grid cell position to real-world lat/lon."""
     metres_per_deg_lat = 111_320
     metres_per_deg_lon = 111_320 * math.cos(math.radians(fire_center_lat))
 
@@ -60,8 +54,7 @@ def _greedy_fallback(
 ) -> list[dict]:
     """
     Greedy heuristic recommendations if the PPO model isn't trained yet.
-    Scores positions geometrically: deploy along the fire perimeter at
-    cardinal/intercardinal points, prioritizing attack from downwind.
+    Deploys along the fire perimeter at cardinal/intercardinal points.
     """
     directions = [
         ("N", -1, 0, "ground_crew", "Establish northern anchor line"),
@@ -73,7 +66,7 @@ def _greedy_fallback(
 
     metres_per_deg_lat = 111_320
     metres_per_deg_lon = 111_320 * math.cos(math.radians(fire_lat))
-    offset_m = spread_1h_m * 0.8  # deploy just inside the 1h projected perimeter
+    offset_m = spread_1h_m * 0.8
 
     waypoints = []
     for name, dlat_factor, dlon_factor, asset, rationale in directions:
@@ -103,15 +96,6 @@ def get_tactical_recommendations(
 
     If the PPO model is trained and saved, uses it for inference.
     Falls back to the greedy heuristic if model isn't available.
-
-    Args:
-        fire_id:            Fire ID string
-        fire_data:          Fire dict with lat/lon from DynamoDB
-        spread_output:      Output from predict_spread() (spread radii)
-        n_inference_steps:  How many environment steps to run inference
-
-    Returns:
-        List of deployment waypoints with lat/lon, asset type, and rationale.
     """
     fire_lat  = float(fire_data.get("latitude",  49.9071)) if fire_data else 49.9071
     fire_lon  = float(fire_data.get("longitude", -119.496)) if fire_data else -119.496
@@ -126,10 +110,8 @@ def get_tactical_recommendations(
         from stable_baselines3 import PPO
         from src.models.fire_env import WildfireEnv
 
-        # Load PPO — pass spread rate to calibrate fire spread probability
         spread_rate_m_per_min = spread_1h / 60.0
         env = WildfireEnv(
-            grid_size=GRID_SIZE,
             base_spread_rate_m_per_min=spread_rate_m_per_min,
         )
         model = PPO.load(str(MODEL_PATH), env=env)
@@ -174,7 +156,7 @@ def get_tactical_recommendations(
             logger.warning("PPO produced no deployments — falling back to heuristic")
             return _greedy_fallback(fire_lat, fire_lon, spread_1h, spread_3h)
 
-        return unique[:8]  # cap at 8 waypoints for the frontend
+        return unique[:8]
 
     except Exception as e:
         logger.error(f"PPO inference failed: {e} — using greedy fallback")
