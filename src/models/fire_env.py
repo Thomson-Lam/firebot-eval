@@ -21,12 +21,9 @@ Usage:
 
 from __future__ import annotations
 
-from typing import Optional
-
-import numpy as np
 import gymnasium as gym
+import numpy as np
 from gymnasium import spaces
-
 
 # Cell types
 UNBURNED      = 0
@@ -110,7 +107,7 @@ class WildfireEnv(gym.Env):
 
     # ── Gym interface ─────────────────────────────────────────────────────────
 
-    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None):
+    def reset(self, seed: int | None = None, options: dict | None = None):
         super().reset(seed=seed)
         self.grid = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.step_count = 0
@@ -256,10 +253,7 @@ class WildfireEnv(gym.Env):
                         nr, nc = r + dr, c + dc
                         if self._in_bounds(nr, nc):
                             cell = self.grid[nr, nc]
-                            if cell == BURNING:
-                                self.grid[nr, nc] = SUPPRESSED
-                                suppressed += 1
-                            elif cell == UNBURNED:
+                            if cell in (BURNING, UNBURNED):
                                 self.grid[nr, nc] = SUPPRESSED
                                 suppressed += 1
                 self.heli_left -= 1
@@ -294,7 +288,7 @@ class WildfireEnv(gym.Env):
         """Stochastic fire spread. Returns number of asset cells lost this step."""
         new_burning = []
         asset_cells_lost = 0
-        burning_cells = list(zip(*np.where(self.grid == BURNING)))
+        burning_cells = list(zip(*np.where(self.grid == BURNING), strict=True))
 
         for (r, c) in burning_cells:
             for dr, dc in [(-1, 0), (1, 0), (0, -1), (0, 1)]:

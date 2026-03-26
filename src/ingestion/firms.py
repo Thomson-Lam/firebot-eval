@@ -14,8 +14,7 @@ Run this from backend/ to test:
 import csv
 import io
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
@@ -63,7 +62,7 @@ def _frp_to_severity(frp: float) -> str:
     return "low"
 
 
-def _normalize_hotspot(row: dict, idx: int) -> Optional[dict]:
+def _normalize_hotspot(row: dict, idx: int) -> dict | None:
     """
     Normalize a single FIRMS CSV row into a FireGrid FireEvent dict.
     Returns None if the row is missing critical fields.
@@ -78,9 +77,9 @@ def _normalize_hotspot(row: dict, idx: int) -> Optional[dict]:
         # Build ISO timestamp from acquisition date + time
         try:
             dt_str = f"{acq_date} {acq_time.zfill(4)}"
-            detected_at = datetime.strptime(dt_str, "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc).isoformat()
+            detected_at = datetime.strptime(dt_str, "%Y-%m-%d %H%M").replace(tzinfo=UTC).isoformat()
         except ValueError:
-            detected_at = datetime.now(timezone.utc).isoformat()
+            detected_at = datetime.now(UTC).isoformat()
 
         province = _assign_province(lat, lon)
         severity = _frp_to_severity(frp)
@@ -104,7 +103,7 @@ def _normalize_hotspot(row: dict, idx: int) -> Optional[dict]:
             "confidence": row.get("confidence", "n"),
             "satellite": row.get("satellite", "N20"),
             "started_at": detected_at,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "source": "NASA_FIRMS_VIIRS",
         }
     except (ValueError, KeyError) as e:

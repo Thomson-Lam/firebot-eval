@@ -33,14 +33,13 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Optional
 
+import joblib
 import numpy as np
 import pandas as pd
-from xgboost import XGBRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score
-import joblib
+from sklearn.model_selection import train_test_split
+from xgboost import XGBRegressor
 
 logger = logging.getLogger(__name__)
 
@@ -221,8 +220,8 @@ def train_spread_model(n_samples: int = 6000) -> tuple[XGBRegressor, XGBRegresso
 
 # ── Lazy Model Loading ────────────────────────────────────────────────────────
 
-_model_1h: Optional[XGBRegressor] = None
-_model_3h: Optional[XGBRegressor] = None
+_model_1h: XGBRegressor | None = None
+_model_3h: XGBRegressor | None = None
 
 
 def _load_models() -> tuple[XGBRegressor, XGBRegressor]:
@@ -280,7 +279,7 @@ def predict_spread_from_features(features: dict) -> dict:
     }
 
 
-def predict_spread(fire_id: str, fire_data: Optional[dict] = None) -> dict:
+def predict_spread(fire_id: str, fire_data: dict | None = None) -> dict:
     """
     High-level call: fetch live weather → build features → predict.
     Called by GET /api/v1/predictions/{fire_id}.
@@ -375,7 +374,7 @@ if __name__ == "__main__":
         print()
 
     print("Feature importances (1h model — sorted):")
-    fi = dict(zip(FEATURE_COLS, model_1h.feature_importances_))
+    fi = dict(zip(FEATURE_COLS, model_1h.feature_importances_, strict=True))
     for feat, imp in sorted(fi.items(), key=lambda x: -x[1]):
         bar = "█" * int(imp * 50)
         print(f"  {feat:<28} {bar} ({imp:.3f})")

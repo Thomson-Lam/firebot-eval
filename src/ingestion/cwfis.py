@@ -14,12 +14,9 @@ Run from backend/ to test:
 import csv
 import io
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
-
-from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +40,7 @@ def _severity_from_status(status: str) -> str:
     return "low"
 
 
-def _normalize_cwfis_row(row: dict) -> Optional[dict]:
+def _normalize_cwfis_row(row: dict) -> dict | None:
     """
     Normalize a single CWFIS CSV row into a FireGrid FireEvent dict.
 
@@ -75,9 +72,9 @@ def _normalize_cwfis_row(row: dict) -> Optional[dict]:
 
         # Build ISO timestamp from start date
         try:
-            started_at = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).isoformat()
+            started_at = datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=UTC).isoformat()
         except (ValueError, TypeError):
-            started_at = datetime.now(timezone.utc).isoformat()
+            started_at = datetime.now(UTC).isoformat()
 
         # Build a stable fire_id using province + fire number
         safe_num = fire_number.replace(" ", "_").replace("/", "-")
@@ -93,7 +90,7 @@ def _normalize_cwfis_row(row: dict) -> Optional[dict]:
             "longitude": lon,
             "area_hectares": hectares,
             "started_at": started_at,
-            "updated_at": datetime.now(timezone.utc).isoformat(),
+            "updated_at": datetime.now(UTC).isoformat(),
             "source": "CWFIS_NRCAN",
         }
     except (ValueError, KeyError, TypeError) as e:

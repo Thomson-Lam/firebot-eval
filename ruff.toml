@@ -1,0 +1,29 @@
+target-version = "py314"
+line-length = 100
+
+[lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "SIM",   # flake8-simplify
+    "RUF",   # ruff-specific rules
+    "N",     # pep8-naming
+]
+ignore = [
+    "E501",   # line too long — handled by formatter
+    "RUF001", # ambiguous unicode in strings
+    "RUF002", # ambiguous unicode in docstrings
+    "RUF003", # ambiguous unicode in comments
+    "RUF012", # mutable class attribute (gymnasium pattern)
+    "N806",   # uppercase variable in function (ML convention: X, X_train, etc.)
+]
+
+[lint.isort]
+known-first-party = ["src"]
+
+[format]
+quote-style = "double"

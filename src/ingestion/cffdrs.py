@@ -23,8 +23,7 @@ import csv
 import io
 import logging
 import math
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
@@ -49,7 +48,7 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
-def _parse_float(val: str) -> Optional[float]:
+def _parse_float(val: str) -> float | None:
     """Safely parse a float from a CSV string, returning None if invalid."""
     try:
         f = float(val)
@@ -58,7 +57,7 @@ def _parse_float(val: str) -> Optional[float]:
         return None
 
 
-def fetch_cffdrs_stations(year: Optional[int] = None) -> list[dict]:
+def fetch_cffdrs_stations(year: int | None = None) -> list[dict]:
     """
     Download the full CWFIS annual FWI observation CSV and parse it.
 
@@ -66,7 +65,7 @@ def fetch_cffdrs_stations(year: Optional[int] = None) -> list[dict]:
     Filters to BC + AB stations only.
     """
     if year is None:
-        year = datetime.now(timezone.utc).year
+        year = datetime.now(UTC).year
 
     url = CFFDRS_BASE_URL.format(year=year)
     logger.info(f"Fetching CFFDRS station data from {url}")
@@ -81,7 +80,7 @@ def fetch_cffdrs_stations(year: Optional[int] = None) -> list[dict]:
     except httpx.HTTPStatusError as e:
         logger.error(f"CFFDRS HTTP {e.response.status_code}")
         # Try prior year as fallback (may not have current year yet)
-        if e.response.status_code == 404 and year == datetime.now(timezone.utc).year:
+        if e.response.status_code == 404 and year == datetime.now(UTC).year:
             logger.info("Trying prior year as fallback...")
             return fetch_cffdrs_stations(year - 1)
         return []
@@ -133,9 +132,9 @@ def fetch_cffdrs_stations(year: Optional[int] = None) -> list[dict]:
 def get_cffdrs_for_location(
     latitude: float,
     longitude: float,
-    stations: Optional[list[dict]] = None,
+    stations: list[dict] | None = None,
     max_radius_km: float = 200.0,
-) -> Optional[dict]:
+) -> dict | None:
     """
     Find the nearest CWFIS weather station and return its CFFDRS indices.
 
@@ -220,7 +219,6 @@ def get_cffdrs_for_fires(fires: list[dict]) -> dict[str, dict]:
 
 # ── Manual test ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import json
     logging.basicConfig(level=logging.INFO)
 
     test_fires = [

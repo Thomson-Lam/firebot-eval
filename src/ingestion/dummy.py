@@ -5,8 +5,7 @@ These helpers keep the API usable when live data sources are unavailable.
 """
 
 import random
-from datetime import datetime, timedelta, timezone
-
+from datetime import UTC, datetime, timedelta
 
 # ── Seed for reproducible dummy data ───────────────────────────────────────────
 random.seed(42)
@@ -44,8 +43,8 @@ DUMMY_FIRE_INCIDENTS = [
         "latitude": 49.9071,
         "longitude": -119.4960,
         "area_hectares": 4200.0,
-        "started_at": (datetime.now(timezone.utc) - timedelta(hours=18)).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": (datetime.now(UTC) - timedelta(hours=18)).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "source": "dummy",
     },
     {
@@ -57,8 +56,8 @@ DUMMY_FIRE_INCIDENTS = [
         "latitude": 50.6745,
         "longitude": -120.3273,
         "area_hectares": 800.0,
-        "started_at": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": (datetime.now(UTC) - timedelta(hours=6)).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "source": "dummy",
     },
     {
@@ -70,8 +69,8 @@ DUMMY_FIRE_INCIDENTS = [
         "latitude": 49.3845,
         "longitude": -121.4483,
         "area_hectares": 250.0,
-        "started_at": (datetime.now(timezone.utc) - timedelta(hours=8)).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": (datetime.now(UTC) - timedelta(hours=8)).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "source": "dummy",
     },
     {
@@ -83,8 +82,8 @@ DUMMY_FIRE_INCIDENTS = [
         "latitude": 56.2370,
         "longitude": -117.2900,
         "area_hectares": 12500.0,
-        "started_at": (datetime.now(timezone.utc) - timedelta(hours=36)).isoformat(),
-        "updated_at": datetime.now(timezone.utc).isoformat(),
+        "started_at": (datetime.now(UTC) - timedelta(hours=36)).isoformat(),
+        "updated_at": datetime.now(UTC).isoformat(),
         "source": "dummy",
     },
 ]
@@ -130,7 +129,7 @@ def get_dummy_burn_probability(fire_id: str) -> dict:
         "fire_id": fire_id,
         "model": "dummy_v0",
         "horizon_hours": 24,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "wind_speed_kmh": random.uniform(20, 60),
         "wind_direction_deg": random.uniform(220, 280),  # SW winds, pushing NE
         "cells": cells,
@@ -229,7 +228,7 @@ def get_dummy_choke_points(fire_id: str) -> dict:
     return {
         "fire_id": fire_id,
         "model": "greedy_heuristic_v0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": datetime.now(UTC).isoformat(),
         "total_choke_points": len(recommendations),
         "recommendations": recommendations,
     }

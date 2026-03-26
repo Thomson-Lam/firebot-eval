@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/ruff-action@v3
+
+  smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v4
+      - run: uv sync
+      - name: Verify env imports and runs
+        run: |
+          uv run python -c "
+          from src.models.fire_env import WildfireEnv
+          env = WildfireEnv()
+          obs, _ = env.reset(seed=42)
+          assert obs.shape == (631,)
+          for _ in range(10):
+              obs, r, done, trunc, info = env.step(env.action_space.sample())
+          print('smoke test passed')
+          "
