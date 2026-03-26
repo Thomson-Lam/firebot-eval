@@ -20,8 +20,7 @@ Run to test:
 """
 
 import logging
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 import httpx
 
@@ -47,7 +46,7 @@ def get_fire_weather(
     longitude: float,
     *,
     timeout: int = 10,
-) -> Optional[dict]:
+) -> dict | None:
     """
     Fetch current weather conditions at a fire's coordinates.
 
@@ -112,7 +111,7 @@ def get_fire_weather(
         "precipitation_mm": current.get("precipitation", 0.0),
         "surface_pressure_hpa": current.get("surface_pressure"),
         "dew_point_c": current.get("dew_point_2m"),
-        "fetched_at": datetime.now(timezone.utc).isoformat(),
+        "fetched_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -146,7 +145,6 @@ def get_weather_for_fires(fires: list[dict]) -> dict[str, dict]:
 
 # ── Manual test ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    import json
     logging.basicConfig(level=logging.INFO)
 
     # Test fires

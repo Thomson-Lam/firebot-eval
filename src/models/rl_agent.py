@@ -14,9 +14,6 @@ from __future__ import annotations
 import logging
 import math
 from pathlib import Path
-from typing import Optional
-
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +84,8 @@ def _greedy_fallback(
 
 def get_tactical_recommendations(
     fire_id: str,
-    fire_data: Optional[dict] = None,
-    spread_output: Optional[dict] = None,
+    fire_data: dict | None = None,
+    spread_output: dict | None = None,
     n_inference_steps: int = 60,
 ) -> list[dict]:
     """
@@ -108,6 +105,7 @@ def get_tactical_recommendations(
 
     try:
         from stable_baselines3 import PPO
+
         from src.models.fire_env import WildfireEnv
 
         spread_rate_m_per_min = spread_1h / 60.0
@@ -122,7 +120,7 @@ def get_tactical_recommendations(
 
         for _ in range(n_inference_steps):
             action, _ = model.predict(obs, deterministic=True)
-            obs, reward, done, truncated, info = env.step(int(action))
+            obs, reward, done, truncated, _info = env.step(int(action))
 
             if int(action) in deployment_actions:
                 lat, lon = _grid_to_latlon(

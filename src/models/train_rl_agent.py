@@ -38,6 +38,7 @@ def train(
     try:
         from stable_baselines3 import PPO
         from stable_baselines3.common.env_util import make_vec_env
+
         from src.models.fire_env import WildfireEnv
     except ImportError as e:
         print(f"Missing dependency: {e}")
@@ -50,8 +51,8 @@ def train(
     print(f"  Timesteps:    {total_timesteps:,}")
     print(f"  Spread rate:  {spread_rate_m_per_min} m/min")
     print(f"  Environments: {n_envs} parallel")
-    print(f"  Grid:         25×25 with critical assets")
-    print(f"  Budgets:      heli=8, crew=20")
+    print("  Grid:         25×25 with critical assets")
+    print("  Budgets:      heli=8, crew=20")
     print()
 
     env_kwargs = {"base_spread_rate_m_per_min": spread_rate_m_per_min}
