@@ -1,14 +1,12 @@
 """
 train_rl_agent.py — PPO tactical agent training script.
 
-Trains a PPO agent on the WildfireEnv gymnasium environment.
-Saves the trained model to src/models/tactical_ppo_agent.zip.
+Trains a PPO agent on the WildfireEnv gymnasium environment (25×25 grid
+with critical assets and finite suppression budgets).
 
-Run from backend/:
+Run:
     uv run python -m src.models.train_rl_agent
-
-Training takes ~2–4 minutes on CPU for 50,000 timesteps.
-For a quick test, use --timesteps 10000 (~30 seconds).
+    uv run python -m src.models.train_rl_agent --timesteps 10000  # quick test
 """
 
 import argparse
@@ -16,14 +14,14 @@ import logging
 import sys
 from pathlib import Path
 
-logging.basicConfig(level=logging.WARNING)  # suppress SB3 verbosity
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 MODEL_SAVE_PATH = Path(__file__).parent / "tactical_ppo_agent"
 
 
 def train(
-    total_timesteps: int = 50_000,
+    total_timesteps: int = 200_000,
     spread_rate_m_per_min: float = 15.0,
     n_envs: int = 4,
     seed: int = 42,
@@ -32,15 +30,14 @@ def train(
     Train the PPO tactical agent.
 
     Args:
-        total_timesteps:      Total env steps to train for. 50k ≈ 3min on CPU.
-        spread_rate_m_per_min: Fire spread rate (from XGBoost) for training conditions.
-        n_envs:               Parallel environments (improves sample efficiency).
-        seed:                 Random seed for reproducibility.
+        total_timesteps:       Total env steps to train for.
+        spread_rate_m_per_min: Fire spread rate (from XGBoost) for training.
+        n_envs:                Parallel environments.
+        seed:                  Random seed for reproducibility.
     """
     try:
         from stable_baselines3 import PPO
         from stable_baselines3.common.env_util import make_vec_env
-        from stable_baselines3.common.callbacks import EvalCallback
         from src.models.fire_env import WildfireEnv
     except ImportError as e:
         print(f"Missing dependency: {e}")
@@ -53,9 +50,10 @@ def train(
     print(f"  Timesteps:    {total_timesteps:,}")
     print(f"  Spread rate:  {spread_rate_m_per_min} m/min")
     print(f"  Environments: {n_envs} parallel")
+    print(f"  Grid:         25×25 with critical assets")
+    print(f"  Budgets:      heli=8, crew=20")
     print()
 
-    # Create vectorized parallel environments
     env_kwargs = {"base_spread_rate_m_per_min": spread_rate_m_per_min}
     vec_env = make_vec_env(
         WildfireEnv,
@@ -64,62 +62,66 @@ def train(
         env_kwargs=env_kwargs,
     )
 
-    # PPO with MlpPolicy — processes the flat (2502,) observation vector
     model = PPO(
         "MlpPolicy",
         vec_env,
         verbose=1,
         learning_rate=3e-4,
-        n_steps=512,            # steps per env before update
+        n_steps=512,
         batch_size=64,
         n_epochs=10,
-        gamma=0.995,            # high discount — rewards future containment
+        gamma=0.995,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,          # encourages exploration
+        ent_coef=0.01,
         seed=seed,
         device="cpu",
     )
 
-    print("Training PPO agent (this takes ~2-4 minutes)...\n")
+    print("Training PPO agent...\n")
     model.learn(total_timesteps=total_timesteps)
 
     model.save(str(MODEL_SAVE_PATH))
     print(f"\nPPO model saved -> {MODEL_SAVE_PATH}.zip")
 
     # Quick evaluation
-    print("\nRunning quick inference test...")
-    from src.models.rl_agent import get_tactical_recommendations
-    demo_fire = {
-        "fire_id": "BC-2026-001",
-        "latitude": 49.9071,
-        "longitude": -119.496,
-        "area_hectares": 12450,
-    }
-    demo_spread = {"spread_1h_m": 900, "spread_3h_m": 2700}
-    waypoints = get_tactical_recommendations("BC-2026-001", demo_fire, demo_spread)
+    print("\nRunning quick evaluation (5 episodes)...")
+    from src.models.fire_env import WildfireEnv as Env
+    eval_env = Env(base_spread_rate_m_per_min=spread_rate_m_per_min)
+    returns = []
+    assets_lost_total = []
+    for ep in range(5):
+        obs, _ = eval_env.reset(seed=seed + ep + 100)
+        ep_return = 0.0
+        for _ in range(150):
+            action, _ = model.predict(obs, deterministic=True)
+            obs, reward, done, truncated, info = eval_env.step(int(action))
+            ep_return += reward
+            if done or truncated:
+                break
+        returns.append(ep_return)
+        assets_lost_total.append(info["assets_lost"])
 
-    print(f"\nGenerated {len(waypoints)} tactical waypoints:")
-    for i, wp in enumerate(waypoints, 1):
-        print(f"  {i}. [{wp['asset_type'].upper()}] "
-              f"({wp['latitude']}, {wp['longitude']}) — {wp['rationale']}")
-
+    print(f"  Mean return:      {sum(returns)/len(returns):.1f}")
+    print(f"  Mean assets lost: {sum(assets_lost_total)/len(assets_lost_total):.1f}")
     print(f"\nTraining complete. Model ready at {MODEL_SAVE_PATH}.zip")
-    print("   Test via API: Invoke-RestMethod http://localhost:8000/api/v1/choke_points/BC-2026-001")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO wildfire tactical agent")
-    parser.add_argument("--timesteps", type=int, default=50_000,
-                        help="Total training timesteps (default: 50000)")
+    parser.add_argument("--timesteps", type=int, default=200_000,
+                        help="Total training timesteps (default: 200000)")
     parser.add_argument("--spread-rate", type=float, default=15.0,
-                        help="Fire spread rate in m/min for training (default: 15.0)")
+                        help="Fire spread rate in m/min (default: 15.0)")
     parser.add_argument("--envs", type=int, default=4,
                         help="Number of parallel environments (default: 4)")
+    parser.add_argument("--seed", type=int, default=42,
+                        help="Random seed (default: 42)")
     args = parser.parse_args()
 
     train(
         total_timesteps=args.timesteps,
         spread_rate_m_per_min=args.spread_rate,
         n_envs=args.envs,
+        seed=args.seed,
     )
