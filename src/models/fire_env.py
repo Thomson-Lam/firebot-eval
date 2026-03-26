@@ -21,8 +21,10 @@ Usage:
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
@@ -83,6 +85,8 @@ class ScenarioConfig:
     asset_layout: str = "A"
     wind_dir_deg: float = 0.0  # 0 = wind blowing north->south
     wind_strength: float = 0.3  # [0, 1]
+    base_spread_prob: float | None = None
+    record_id: str | None = None
 
     def __post_init__(self):
         assert self.ignition in IGNITION_TYPES, f"Unknown ignition: {self.ignition}"
@@ -91,6 +95,8 @@ class ScenarioConfig:
 
     @property
     def spread_prob(self) -> float:
+        if self.base_spread_prob is not None:
+            return float(self.base_spread_prob)
         return SEVERITY_SPREAD_PROB[self.severity]
 
     @property
@@ -126,6 +132,38 @@ def random_scenario(
     )
 
 
+def load_scenario_parameter_records(path: str | Path) -> list[dict]:
+    """Load cached scenario parameter records from a JSON file."""
+    records_path = Path(path)
+    payload = json.loads(records_path.read_text())
+    records = payload.get("records", []) if isinstance(payload, dict) else payload
+    if not isinstance(records, list):
+        msg = f"Invalid scenario parameter dataset: {records_path}"
+        raise ValueError(msg)
+    return [record for record in records if isinstance(record, dict)]
+
+
+def scenario_from_parameter_record(
+    record: dict,
+    *,
+    ignition: str,
+    asset_layout: str,
+) -> ScenarioConfig:
+    """Build a ScenarioConfig from a cached parameter record."""
+    severity = str(record.get("severity_bucket", "medium")).lower()
+    return ScenarioConfig(
+        ignition=ignition,
+        severity=severity if severity in SEVERITY_LEVELS else "medium",
+        asset_layout=asset_layout,
+        wind_dir_deg=float(record.get("wind_dir_deg", 0.0) or 0.0),
+        wind_strength=float(record.get("wind_strength", 0.3) or 0.3),
+        base_spread_prob=float(record.get("base_spread_prob"))
+        if record.get("base_spread_prob") is not None
+        else None,
+        record_id=str(record.get("record_id")) if record.get("record_id") is not None else None,
+    )
+
+
 # ── Environment ──────────────────────────────────────────────────────────────
 
 
@@ -155,6 +193,7 @@ class WildfireEnv(gym.Env):
         crew_cooldown: int = 2,
         randomize_scenario: bool = True,
         scenario_families: list[tuple[str, str, str]] | None = None,
+        scenario_parameter_records: list[dict] | None = None,
         # Legacy compat -- ignored if scenario is provided
         base_spread_rate_m_per_min: float | None = None,
     ):
@@ -168,6 +207,8 @@ class WildfireEnv(gym.Env):
         self.crew_cooldown_duration = crew_cooldown
         self.randomize_scenario = randomize_scenario
         self.scenario_families = scenario_families
+        self.scenario_parameter_records = scenario_parameter_records or []
+        self._active_parameter_record: dict | None = None
 
         # Scenario (may be overridden each reset if randomize_scenario=True)
         if scenario is not None:
@@ -224,7 +265,25 @@ class WildfireEnv(gym.Env):
 
         # Optionally sample a new scenario
         if self.randomize_scenario:
-            self._scenario = random_scenario(self.np_random, self.scenario_families)
+            families = self.scenario_families or TRAIN_FAMILIES
+            ign, sev, layout = families[int(self.np_random.integers(len(families)))]
+            if self.scenario_parameter_records:
+                matching_records = [
+                    record
+                    for record in self.scenario_parameter_records
+                    if str(record.get("severity_bucket", "")).lower() == sev
+                ]
+                source_records = matching_records or self.scenario_parameter_records
+                record = source_records[int(self.np_random.integers(len(source_records)))]
+                self._active_parameter_record = record
+                self._scenario = scenario_from_parameter_record(
+                    record,
+                    ignition=ign,
+                    asset_layout=layout,
+                )
+            else:
+                self._active_parameter_record = None
+                self._scenario = random_scenario(self.np_random, families)
 
         # Reset budgets and cooldowns
         self.heli_left = self.heli_budget_init
@@ -242,7 +301,10 @@ class WildfireEnv(gym.Env):
         self.agent_pos = [0, 0]
         self._prev_burning = int(np.sum(self.grid == BURNING))
 
-        return self._get_obs(), {"scenario": self._scenario}
+        return self._get_obs(), {
+            "scenario": self._scenario,
+            "parameter_record": self._active_parameter_record,
+        }
 
     def step(self, action: int):
         self.step_count += 1
@@ -294,6 +356,7 @@ class WildfireEnv(gym.Env):
             "heli_left": self.heli_left,
             "crew_left": self.crew_left,
             "scenario": self._scenario,
+            "parameter_record": self._active_parameter_record,
         }
 
         return self._get_obs(), reward, terminated, truncated, info

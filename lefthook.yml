@@ -2,7 +2,10 @@ pre-commit:
   commands:
     lint:
       glob: "*.py"
-      run: uv run ruff check {staged_files}
+      run: uv run ruff check --fix --unsafe-fixes {staged_files}
+      stage_fixed: true
     format-check:
       glob: "*.py"
       run: uv run ruff format --check {staged_files}
+      stage_fixed: true
+

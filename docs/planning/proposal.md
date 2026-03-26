@@ -33,7 +33,7 @@ The developed technique is not a new RL algorithm. It is an enhanced benchmark e
 
 1. **Prioritization under risk**: critical assets can be lost if not protected.
 2. **Planning under scarcity**: helicopter/crew actions are limited and costly.
-3. **Spatial reasoning**: non-uniform spread field (flammability map or wind bias).
+3. **Spatial reasoning**: non-uniform spread conditions from fixed episode parameters such as spread severity and wind bias.
 4. **Robustness testing**: multiple scenario families and held-out test families.
 
 Core intuition: better benchmark structure and rigorous evaluation produce more defensible RL evidence than adding algorithmic novelty under time pressure.
@@ -64,8 +64,8 @@ Optional only if hidden regime shifts are added and time permits:
    - limited helicopter drops and crew deployments
    - resource cost and cooldown penalties
 
-3. **Heterogeneous spread field (choose one)**
-   - flammability map, or
+3. **Heterogeneous spread conditions**
+   - precomputed spread severity from the static dataset
    - directional wind bias
 
 4. **Clean benchmark harness**
@@ -151,11 +151,12 @@ Data pipeline remains **supporting context**, not the central empirical claim.
 Based on audit findings, claims must stay realistic:
 
 - implemented ingestion: FIRMS, CWFIS active fires, Open-Meteo, CFFDRS
+- benchmark use: one-time ingestion and preprocessing into static scenario records with precomputed environment variables
 - not fully implemented as production ETL: CIFFC, BC/AB ArcGIS full pipeline, ECCC Datamart orchestration, broad historical validated spread labels
 
 Paper wording will avoid operational overclaim and state:
 
-"We benchmark RL methods in an enhanced custom wildfire simulator inspired by wildfire decision-support structure."
+"We benchmark RL methods in an enhanced custom wildfire simulator using static snapshot-derived scenario records and fixed environment parameterization."
 
 ---
 
@@ -166,7 +167,7 @@ Day 1:
 - Add critical assets + resource budgets to environment.
 
 Day 2:
-- Add scenario generator and heterogeneous spread field.
+- Add scenario generator and static parameter preprocessing for spread severity and wind bias.
 - Add eval mode without fallback contamination.
 
 Day 3:
@@ -175,7 +176,7 @@ Day 3:
 
 Day 4:
 - Pilot runs and reward sanity checks.
-- Fix instability and calibration issues.
+- Fix instability and environment calibration issues.
 
 Day 5:
 - Full multi-seed train/eval runs.

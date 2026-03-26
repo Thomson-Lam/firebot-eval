@@ -25,6 +25,7 @@ def train(
     spread_rate_m_per_min: float = 15.0,
     n_envs: int = 4,
     seed: int = 42,
+    scenario_dataset_path: str | None = None,
 ) -> None:
     """
     Train the PPO tactical agent.
@@ -39,7 +40,7 @@ def train(
         from stable_baselines3 import PPO
         from stable_baselines3.common.env_util import make_vec_env
 
-        from src.models.fire_env import WildfireEnv
+        from src.models.fire_env import WildfireEnv, load_scenario_parameter_records
     except ImportError as e:
         print(f"Missing dependency: {e}")
         print("   Run: uv sync")
@@ -55,7 +56,13 @@ def train(
     print("  Budgets:      heli=8, crew=20")
     print()
 
-    env_kwargs = {"base_spread_rate_m_per_min": spread_rate_m_per_min}
+    env_kwargs: dict = {}
+    if scenario_dataset_path:
+        records = load_scenario_parameter_records(scenario_dataset_path)
+        env_kwargs["scenario_parameter_records"] = records
+        print(f"  Scenario records: {len(records)} from {scenario_dataset_path}")
+    else:
+        env_kwargs["base_spread_rate_m_per_min"] = spread_rate_m_per_min
     vec_env = make_vec_env(
         WildfireEnv,
         n_envs=n_envs,
@@ -88,7 +95,9 @@ def train(
     # Quick evaluation
     print("\nRunning quick evaluation (5 episodes)...")
     from src.models.fire_env import WildfireEnv as Env
-    eval_env = Env(base_spread_rate_m_per_min=spread_rate_m_per_min)
+
+    eval_kwargs = dict(env_kwargs)
+    eval_env = Env(**eval_kwargs)
     returns = []
     assets_lost_total = []
     for ep in range(5):
@@ -103,21 +112,29 @@ def train(
         returns.append(ep_return)
         assets_lost_total.append(info["assets_lost"])
 
-    print(f"  Mean return:      {sum(returns)/len(returns):.1f}")
-    print(f"  Mean assets lost: {sum(assets_lost_total)/len(assets_lost_total):.1f}")
+    print(f"  Mean return:      {sum(returns) / len(returns):.1f}")
+    print(f"  Mean assets lost: {sum(assets_lost_total) / len(assets_lost_total):.1f}")
     print(f"\nTraining complete. Model ready at {MODEL_SAVE_PATH}.zip")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train PPO wildfire tactical agent")
-    parser.add_argument("--timesteps", type=int, default=200_000,
-                        help="Total training timesteps (default: 200000)")
-    parser.add_argument("--spread-rate", type=float, default=15.0,
-                        help="Fire spread rate in m/min (default: 15.0)")
-    parser.add_argument("--envs", type=int, default=4,
-                        help="Number of parallel environments (default: 4)")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Random seed (default: 42)")
+    parser.add_argument(
+        "--timesteps", type=int, default=200_000, help="Total training timesteps (default: 200000)"
+    )
+    parser.add_argument(
+        "--spread-rate", type=float, default=15.0, help="Fire spread rate in m/min (default: 15.0)"
+    )
+    parser.add_argument(
+        "--envs", type=int, default=4, help="Number of parallel environments (default: 4)"
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed (default: 42)")
+    parser.add_argument(
+        "--scenario-dataset",
+        type=str,
+        default=None,
+        help="Path to cached scenario parameter JSON dataset",
+    )
     args = parser.parse_args()
 
     train(
@@ -125,4 +142,5 @@ if __name__ == "__main__":
         spread_rate_m_per_min=args.spread_rate,
         n_envs=args.envs,
         seed=args.seed,
+        scenario_dataset_path=args.scenario_dataset,
     )

@@ -1,8 +1,8 @@
-# Environment Spec: Wildfire Simulator + XGBoost Calibration
+# Frozen Environment Spec: Wildfire Simulator
 
-This document is a concrete implementation guide for how the wildfire RL environment should work and how XGBoost interfaces with it.
+This document is the frozen canonical specification for the wildfire RL benchmark and its static scenario-parameter interface.
 
-It is aligned with `impl-plan.md` and intended to remove ambiguity before coding and experiments.
+It is aligned with `docs/planning/impl-plan.md` and is intended to remove ambiguity before coding, benchmarking, and reporting.
 
 ---
 
@@ -53,6 +53,11 @@ At each step, the policy receives:
 5. Severity one-hot: `[low, medium, high]`
 6. Wind bias vector: `(wx, wy)`
 
+Canonical observation rule:
+
+- The benchmark observation is the single encoded grid plus scalar features listed above.
+- Multi-channel observation variants are allowed only as ablations or future work and must not replace the canonical benchmark interface in the main comparison.
+
 This state lets the policy reason about:
 
 - where the fire is,
@@ -64,6 +69,11 @@ This state lets the policy reason about:
 
 ## 4) Action Semantics (Hard Rules)
 
+Action categories:
+
+- Mobility actions: `MOVE_N`, `MOVE_S`, `MOVE_E`, `MOVE_W`
+- Intervention actions: `DEPLOY_HELICOPTER`, `DEPLOY_CREW`
+
 Action IDs:
 
 - `0`: `MOVE_N`
@@ -72,6 +82,11 @@ Action IDs:
 - `3`: `MOVE_W`
 - `4`: `DEPLOY_HELICOPTER`
 - `5`: `DEPLOY_CREW`
+
+Canonical action rule:
+
+- The canonical benchmark action set contains exactly these 6 actions.
+- `WAIT` is not part of the frozen benchmark and may be introduced only in ablations.
 
 Rules:
 
@@ -113,7 +128,12 @@ Spread probability is episode-parameterized:
 
 - baseline from `base_spread_prob`
 - adjusted by wind bias `(wx, wy)` relative to neighbor direction
-- optional local modifiers if additional heterogeneity is enabled
+
+Canonical heterogeneity rule:
+
+- Wind bias is the only mandatory heterogeneity mechanism in canonical runs.
+- Additional local modifiers such as flammability maps are ablations or future work and must be reported separately.
+- Control-tick versus fire-tick cadence changes are also deferred to ablations or future work.
 
 Episode termination:
 
@@ -149,55 +169,45 @@ Interpretation:
 
 ---
 
-## 7) XGBoost Interface: What It Does and Does Not Do
+## 7) Static Scenario Parameter Interface
 
-XGBoost is used to calibrate episode conditions from cached real-data snapshots.
+The benchmark uses cached scenario records with environment variables computed offline before training and evaluation. These variables are not inferred live during benchmark runs.
 
-- It does **not** choose actions.
-- It does **not** replace the RL policy.
-- It does **not** make real-time tactical decisions.
+## 7.1 Snapshot inputs used during preprocessing
 
-It outputs simulator parameters at episode reset.
-
-## 7.1 Snapshot input features (for XGBoost)
-
-Required canonical features:
+Required canonical fields available to the preprocessing pipeline:
 
 - weather: `wind_speed_km_h`, `wind_direction_deg`, `temperature_c`, `relative_humidity_pct`, `precipitation_mm`
 - danger: `fwi`, `isi`, `bui`
 - incident: `area_hectares`, `latitude`, `longitude`, `province`
 
-Optional useful features (if ingestion/training pipeline is extended):
+Optional retained metadata:
 
-- `frp_mw` (FIRMS)
+- `frp_mw`
 - `cffdrs_station_distance_km`
 - `dmc`, `dc`, `ffmc`
-- temporal deltas from snapshot history
 
-## 7.2 XGBoost output contract
+## 7.2 Stored parameter record contract
 
-For each snapshot record:
+For each cached scenario record, store:
 
-1. `spread_intensity` in `[0,1]`
-2. `spread_rate_1h_m` (logging + interpretability)
-3. `wind_dir_deg` (pass-through from snapshot)
-4. `wind_strength` in `[0,1]` (normalized from wind speed)
-5. `severity_bucket` from `spread_intensity`
+1. `base_spread_prob`
+2. `severity_bucket`
+3. `wind_dir_deg`
+4. `wind_strength`
+5. optional logging fields such as `spread_rate_1h_m`
 
 Deterministic env mapping:
 
-- `base_spread_prob = 0.04 + 0.18 * spread_intensity`
-- severity:
-  - low: `<0.33`
-  - medium: `0.33-0.66`
-  - high: `>0.66`
+- severity is encoded one-hot in the observation from `severity_bucket`
 - wind vector:
   - `wx = wind_strength * cos(wind_dir_deg)`
   - `wy = wind_strength * sin(wind_dir_deg)`
+- `base_spread_prob` is consumed directly by the environment spread rule
 
 Episode rule:
 
-- Sample one parameter record at reset.
+- Sample one cached parameter record at reset.
 - Keep it fixed for the full episode in canonical runs.
 
 ---
@@ -210,8 +220,8 @@ Required workflow:
 
 1. Collect and normalize ingestion data.
 2. Write versioned snapshot cache file(s).
-3. Build XGBoost features from snapshots.
-4. Produce env-parameter records.
+3. Compute environment variables offline from snapshot records.
+4. Produce cached env-parameter records.
 5. Train/evaluate RL only from cached records + seeded RNG.
 
 Fail-fast rule:
@@ -239,6 +249,11 @@ Fail-fast rule:
 - Final eval episodes per seed: `100`
 
 ## 9.3 Scenario families
+
+Asset layout definitions:
+
+- Layout `A`: one dense high-value asset cluster placed near moderate exposure to common ignition zones.
+- Layout `B`: two smaller separated asset clusters with different distances from common ignition zones.
 
 Train families:
 
@@ -287,6 +302,13 @@ Secondary metrics:
 - resource efficiency
 - wasted deployment rate
 - held-out performance drop
+- normalized burn ratio
+
+Normalized burn ratio definition:
+
+- `normalized_burn_ratio = final_burned_area_with_policy / final_burned_area_no_action_same_scenario`
+- For each evaluation scenario, run a no-action baseline with the same initial scenario record and RNG seed.
+- Report this as an evaluation-only metric; do not include it in the training reward.
 
 Interpretability checks:
 
