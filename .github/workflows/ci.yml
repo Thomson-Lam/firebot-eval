@@ -25,7 +25,7 @@ jobs:
           from src.models.fire_env import WildfireEnv
           env = WildfireEnv()
           obs, _ = env.reset(seed=42)
-          assert obs.shape == (631,)
+          assert obs.shape == (636,)
           for _ in range(10):
               obs, r, done, trunc, info = env.step(env.action_space.sample())
           print('smoke test passed')
