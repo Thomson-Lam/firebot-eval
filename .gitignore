@@ -10,6 +10,8 @@ wheels/
 .venv
 .env
 
+data/
+
 #logs
 wandb
 

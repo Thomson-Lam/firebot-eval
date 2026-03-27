@@ -18,8 +18,11 @@ import os
 from datetime import UTC, datetime
 
 import httpx
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+
+load_dotenv()
 
 # ── Canada Bounding Box (BC + AB focus) ─────────────────────────────────────────
 # Format: W,S,E,N  (longitude_min, latitude_min, longitude_max, latitude_max)

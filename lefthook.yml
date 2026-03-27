@@ -4,8 +4,7 @@ pre-commit:
       glob: "*.py"
       run: uv run ruff check --fix --unsafe-fixes {staged_files}
       stage_fixed: true
-    format-check:
+    format:
       glob: "*.py"
-      run: uv run ruff format --check {staged_files}
+      run: uv run ruff format {staged_files}
       stage_fixed: true
-

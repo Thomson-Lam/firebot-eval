@@ -15,6 +15,8 @@ Training and evaluation should then use only the cached parameter dataset plus s
 
 The current pipeline still fetches live source data during the one-time build step unless you provide precollected historical fire records via `--fire-records`, but benchmark runs themselves should not call live APIs.
 
+The builder is now centered on CWFIS as the primary incident source. FIRMS remains supplementary.
+
 ---
 
 ## 2) Ingestion Modules
@@ -115,15 +117,22 @@ It also computes offline environment variables such as:
 - `wind_strength`
 - audit fields like `spread_rate_1h_m`, `spread_score`, `dryness_score`, and `record_quality_flag`
 
+It also enforces tighter acceptance criteria:
+
+- CWFIS records are preferred over FIRMS hotspots
+- CFFDRS must match by both nearest-station distance and snapshot-date tolerance
+- canonical records are rejected if required fire-danger fields are missing
+
 ---
 
 ## 3) Static Dataset Build Flow
 
 ```text
-live fire sources or precollected historical fire records
--> normalized fire records
+CWFIS incident records
+-> optional FIRMS hotspot supplementation
+-> deduplicated candidate fire records
 -> weather enrichment from Open-Meteo
--> nearest-station CFFDRS enrichment
+-> CFFDRS nearest-station plus snapshot-date matching
 -> snapshot_records.json
 -> offline environment-variable builder
 -> scenario_parameter_records.json
@@ -142,6 +151,11 @@ Optional historical-record input:
 ```bash
 uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
 ```
+
+Year note:
+
+- Do not rely on `--cffdrs-year 2025` for live builds unless you first verify that the requested station file contains populated fire-danger values for the records you want.
+- In current testing, the 2025 live station file loaded but had no usable `FWI` values for accepted records, so it produced zero scenario records.
 
 ---
 
@@ -165,6 +179,15 @@ The table below describes how ingested data fields map into the cached environme
 | `size_factor` | `area_hectares` | weak incident-size multiplier | audit/debug only |
 | `record_quality_flag` | `area_hectares`, `frp_mw` | marks measured vs imputed area path | audit/debug only |
 
+Snapshot acceptance metadata written to `snapshot_records.json`:
+
+| Snapshot field | Source | Purpose |
+|---|---|---|
+| `snapshot_date` | CWFIS or supplied historical fire record | anchor date for temporal matching |
+| `cffdrs_observation_date` | matched CFFDRS station record | actual danger-observation date |
+| `cffdrs_date_offset_days` | derived during matching | temporal gap between fire record and station observation |
+| `temporal_alignment_status` | derived during matching | `aligned` or `near_aligned` |
+
 More detailed field provenance:
 
 | Snapshot field | Source module | Notes |
@@ -174,10 +197,10 @@ More detailed field provenance:
 | `temperature_c` | `src/ingestion/weather.py` | live during one-time build only |
 | `relative_humidity_pct` | `src/ingestion/weather.py` | live during one-time build only |
 | `precipitation_mm` | `src/ingestion/weather.py` | live during one-time build only |
-| `fwi` | `src/ingestion/cffdrs.py` | nearest-station lookup |
-| `isi` | `src/ingestion/cffdrs.py` | nearest-station lookup |
-| `bui` | `src/ingestion/cffdrs.py` | nearest-station lookup |
-| `ffmc` | `src/ingestion/cffdrs.py` | nearest-station lookup, optional but used if available |
+| `fwi` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
+| `isi` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
+| `bui` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
+| `ffmc` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance, optional but used if available |
 | `area_hectares` | `src/ingestion/cwfis.py` or imputed in `src/ingestion/static_dataset.py` | FIRMS path may infer area from `frp_mw` |
 | `frp_mw` | `src/ingestion/firms.py` | optional metadata, used only for area imputation right now |
 
@@ -203,6 +226,7 @@ The redesigned pipeline is much closer to the intended benchmark workflow, but s
 - source ingestion is still live during the one-time build unless `--fire-records` is used
 - the available public feeds are current/recent feeds, not a curated historical spread-label dataset
 - `area_hectares` may be imputed for FIRMS-derived records
+- current Open-Meteo enrichment is still fetched at build time and is not yet archived weather aligned to the same historical timestamp
 - there is still no terrain, fuel-model, or perimeter-growth dataset in the canonical pipeline
 
 This is acceptable for the current benchmark because the goal is to build realistic episode parameters for a fixed tactical RL environment, not an operational wildfire forecaster.

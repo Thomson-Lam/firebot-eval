@@ -72,10 +72,10 @@ Check `docs/data-pipeline.md` for how these variables are computed.
 ### How data is collected 
 
 ```
-CWFIS active fires -> FIRMS data using NASA API -> live fire collection.
+CWFIS incident records -> optional FIRMS hotspot supplementation -> candidate fire records.
 ```
 
-Fire candidates are deduplicated by `fire_id` and coarse latitude/longitude and province, then sorted so records with measured `area_hectares` are preferred. For each selected fire, `static_dataset.py` fetches weather from Open-Meteo and finds the nearest CFFDRS station. Then a normalized snapshot record is built and the environment parameters are computed from the snapshot record:
+Fire candidates are deduplicated by `fire_id` and coarse latitude/longitude and province, then sorted so CWFIS records with measured `area_hectares` are preferred. For each selected fire, `static_dataset.py` fetches weather from Open-Meteo and matches the nearest CFFDRS station by both distance and snapshot date. Then a normalized snapshot record is built and the environment parameters are computed from the snapshot record:
 
 ```
 fire record -> snapshot record (`data/static/snapshot_records.json`) -> scenario (environment) parameter record (`data/static/scenario_parameter_records.json`).
@@ -97,10 +97,10 @@ With FIRMS:
 uv run python -m src.ingestion.static_dataset --target-count 100 --include-firms 
 ```
 
-With fixed CFFDRS year for reproducibility:
+With a fixed CFFDRS year for a historical record file that already contains matching snapshot dates:
 
 ```bash
-uv run python -m src.infestion.static_dataset --target-count 100 --cffdrs-year 2025
+uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100 --cffdrs-year 2024
 ```
 
 If you have your own fire records file:
@@ -109,11 +109,11 @@ If you have your own fire records file:
 uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
 ```
 
-For the project, the following was run to aggregate and get the full dataset to then rcreate the static environment variables for training the RL agent:
+Notes:
 
-```bash
-uv run python -m src.ingestion.static_dataset --target-count 100 --include-firms --cffdrs-year 2025 
-```
+- Do not hard-code `--cffdrs-year 2025` for live builds. The currently available 2025 CFFDRS station file may contain no usable danger-index values, which produces zero records.
+- For live builds, prefer omitting `--cffdrs-year` and using the builder only when the current season has populated CFFDRS observations.
+- For reproducible historical builds, use `--fire-records` with a curated historical file and a CFFDRS year known to contain populated station observations.
 
 After building the dataset, you can train by running:
 

@@ -18,7 +18,7 @@ import argparse
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -45,9 +45,31 @@ def _norm(value: float, low: float, high: float) -> float:
 
 def _canonical_record_id(fire: dict) -> str:
     fire_id = str(fire.get("fire_id", "unknown"))
-    updated_at = str(fire.get("updated_at", "unknown"))
-    safe_time = updated_at.replace(":", "").replace("-", "").replace("+", "_")
+    anchor = str(
+        fire.get("snapshot_date") or fire.get("updated_at") or fire.get("started_at") or "unknown"
+    )
+    safe_time = anchor.replace(":", "").replace("-", "").replace("+", "_")
     return f"{fire_id}__{safe_time}"
+
+
+def _parse_iso_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        if "T" in text:
+            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
+        return datetime.strptime(text, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def _infer_snapshot_date(fire: dict) -> date | None:
+    return (
+        _parse_iso_date(fire.get("snapshot_date"))
+        or _parse_iso_date(fire.get("updated_at"))
+        or _parse_iso_date(fire.get("started_at"))
+    )
 
 
 def _dedupe_fires(fires: list[dict]) -> list[dict]:
@@ -76,10 +98,11 @@ def _dedupe_fires(fires: list[dict]) -> list[dict]:
 
 
 def _fire_priority(fire: dict) -> tuple[int, float, str]:
+    source_rank = 2 if str(fire.get("source", "")).startswith("CWFIS") else 1
     has_area = 1 if fire.get("area_hectares") not in (None, 0, 0.0, "") else 0
     area = float(fire.get("area_hectares") or 0.0)
     source = str(fire.get("source", "zzz"))
-    return (has_area, area, source)
+    return (source_rank, has_area, area, source)
 
 
 def _load_fire_records(path: Path) -> list[dict]:
@@ -105,7 +128,7 @@ def collect_candidate_fires(
         try:
             from src.ingestion.firms import fetch_firms_hotspots
 
-            fires.extend(fetch_firms_hotspots(day_range=7))
+            fires.extend(fetch_firms_hotspots(day_range=5))
         except Exception as exc:
             logger.warning("Skipping FIRMS candidate collection: %s", exc)
 
@@ -124,10 +147,28 @@ def build_snapshot_record(fire: dict, *, stations: list[dict]) -> dict | None:
     if lat is None or lon is None:
         return None
 
+    source = str(fire.get("source", ""))
+    snapshot_date = _infer_snapshot_date(fire)
+    if source.startswith("CWFIS") and snapshot_date is None:
+        logger.warning("Skipping CWFIS fire without usable snapshot date: %s", fire.get("fire_id"))
+        return None
+
     weather = get_fire_weather(float(lat), float(lon))
-    cffdrs = get_cffdrs_for_location(float(lat), float(lon), stations=stations)
+    cffdrs = get_cffdrs_for_location(
+        float(lat),
+        float(lon),
+        stations=stations,
+        target_date=snapshot_date,
+        max_date_offset_days=1,
+    )
 
     if not weather or not cffdrs:
+        return None
+
+    if cffdrs.get("date_offset_days", 0) > 1:
+        return None
+
+    if source.startswith("CWFIS") and cffdrs.get("observation_date") is None:
         return None
 
     area_hectares = fire.get("area_hectares")
@@ -146,6 +187,7 @@ def build_snapshot_record(fire: dict, *, stations: list[dict]) -> dict | None:
         "province": fire.get("province"),
         "name": fire.get("name"),
         "status": fire.get("status"),
+        "snapshot_date": snapshot_date.isoformat() if snapshot_date else None,
         "latitude": float(lat),
         "longitude": float(lon),
         "area_hectares": float(area_hectares),
@@ -167,6 +209,11 @@ def build_snapshot_record(fire: dict, *, stations: list[dict]) -> dict | None:
         "cffdrs_station_distance_km": cffdrs.get("distance_km"),
         "cffdrs_station_id": cffdrs.get("source_station_id"),
         "cffdrs_station_name": cffdrs.get("source_station"),
+        "cffdrs_observation_date": cffdrs.get("observation_date"),
+        "cffdrs_date_offset_days": cffdrs.get("date_offset_days"),
+        "temporal_alignment_status": "aligned"
+        if cffdrs.get("date_offset_days", 0) == 0
+        else "near_aligned",
         "frp_mw": fire.get("frp_mw"),
         "record_quality_flag": quality_flag,
         "snapshot_generated_at": datetime.now(UTC).isoformat(),
@@ -316,6 +363,10 @@ def build_static_datasets(
 
     logger.info("Wrote %s snapshot records to %s", len(snapshots), snapshot_path)
     logger.info("Wrote %s scenario parameter records to %s", len(parameter_records), params_path)
+    if not parameter_records:
+        logger.warning(
+            "No scenario parameter records were built. Check whether fire sources returned records and whether CFFDRS provided usable danger indices for the selected year."
+        )
     return SnapshotBuildResult(
         snapshots=snapshots, parameter_records=parameter_records, output_dir=output_dir
     )
