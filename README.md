@@ -94,6 +94,8 @@ Default usage from the Alberta historical CSV:
 uv run python -m src.ingestion.static_dataset --target-count 100
 ```
 
+`--target-count 100` means up to `100` records per split (`train`, `val`, `holdout`).
+
 With optional supplementary CFFDRS enrichment:
 
 ```bash
@@ -125,3 +127,15 @@ uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenar
 ```
 
 The cached scenario parameter file can then be consumed by `FireEnv` and PPO training.
+
+The builder also writes year-based split files for the benchmark:
+
+- `train`: `2006-2022`
+- `val`: `2023`
+- `holdout`: `2024-2025`
+
+Recommended training command:
+
+```bash
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
+```

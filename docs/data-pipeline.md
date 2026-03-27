@@ -120,6 +120,21 @@ This path does not use FIRMS or Open-Meteo in the canonical benchmark build.
 
 The builder writes `data/static/snapshot_records.json`.
 
+It also writes per-split files using the frozen year strategy:
+
+- `train`: `2006-2022`
+- `val`: `2023`
+- `holdout`: `2024-2025`
+
+Generated split files:
+
+- `data/static/snapshot_records_train.json`
+- `data/static/snapshot_records_val.json`
+- `data/static/snapshot_records_holdout.json`
+- `data/static/scenario_parameter_records_train.json`
+- `data/static/scenario_parameter_records_val.json`
+- `data/static/scenario_parameter_records_holdout.json`
+
 Each snapshot record represents one Alberta wildfire incident anchored at the initial assessment time.
 
 Core stored fields:
@@ -215,6 +230,8 @@ Build the canonical dataset from the Alberta historical CSV:
 uv run python -m src.ingestion.static_dataset --target-count 100
 ```
 
+Here, `--target-count 100` means up to `100` records per split, not `100` total records overall.
+
 Build with optional supplementary CFFDRS enrichment:
 
 ```bash
@@ -237,6 +254,12 @@ Then train from the cached parameter file:
 
 ```bash
 uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records.json
+```
+
+Recommended benchmark training/eval uses the split files directly:
+
+```bash
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
 ```
 
 ---
