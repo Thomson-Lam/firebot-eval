@@ -34,18 +34,21 @@ uv run python -m src.models.train_rl_agent --timesteps 10000
 
 ## Data Pipeline 
 
-We ingest data from the following sources:
+The canonical benchmark pipeline now uses the Alberta historical wildfire dataset in `data/static/` as its primary source.
 
-- CWFIS: the primary source of wildfire incidents 
-- FIRMS: supplements CWFIS data with hotspot sources 
-- CFFDRS: fire danger levels and dryness context
+Source roles:
+
+- Alberta historical wildfire dataset: primary incident, weather, spread-rate, and assessment-time source
+- CFFDRS: optional supplementary fire-danger enrichment
+- CWFIS and FIRMS: retained in the repo for legacy/live experiments, not part of the canonical build path
 
 Refer to `docs/data-pipeline.md` for exact fields and data we ingest.
 
 We build the static dataset at `src/ingestion/static_dataset.py`. The script:
 
-- collects candidate fire records once
-- enriches them with weather and CFFDRS fields
+- loads historical incident rows from `data/static/fp-historical-wildfire-data-2006-2025.csv`
+- normalizes them into snapshot records anchored at assessment time
+- optionally enriches them with CFFDRS fields when `--cffdrs-year` is provided and usable
 - writes frozen and normalized `snapshot_records.json` of snapshot records from the data pipeline inside `data/static`
 - computes offline environment variables and write `scenario_parameter_records.json` in `data/static`. The environment variables written are:
     - `base_spread_prob`
@@ -72,10 +75,10 @@ Check `docs/data-pipeline.md` for how these variables are computed.
 ### How data is collected 
 
 ```
-CWFIS incident records -> optional FIRMS hotspot supplementation -> candidate fire records.
+Alberta historical wildfire CSV -> normalized snapshot records -> scenario parameter records.
 ```
 
-Fire candidates are deduplicated by `fire_id` and coarse latitude/longitude and province, then sorted so CWFIS records with measured `area_hectares` are preferred. For each selected fire, `static_dataset.py` fetches weather from Open-Meteo and matches the nearest CFFDRS station by both distance and snapshot date. Then a normalized snapshot record is built and the environment parameters are computed from the snapshot record:
+Each record is anchored at `ASSESSMENT_DATETIME`. The builder uses observed spread rate, assessment weather, incident size, fire type, and fuel type to compute benchmark environment variables. If `--cffdrs-year` is passed and a usable station file exists, the builder also joins supplementary CFFDRS danger indices by both distance and date.
 
 ```
 fire record -> snapshot record (`data/static/snapshot_records.json`) -> scenario (environment) parameter record (`data/static/scenario_parameter_records.json`).
@@ -85,25 +88,25 @@ For more details, check `docs/data-pipeline.md`
 
 ### Usage from project root
 
-Default usage without FIRMS data and only CWFIS data:
+Default usage from the Alberta historical CSV:
 
 ```bash
 uv run python -m src.ingestion.static_dataset --target-count 100
 ```
 
-With FIRMS:
+With optional supplementary CFFDRS enrichment:
 
 ```bash
-uv run python -m src.ingestion.static_dataset --target-count 100 --include-firms 
+uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025
 ```
 
-With a fixed CFFDRS year for a historical record file that already contains matching snapshot dates:
+With a custom raw Alberta CSV path:
 
 ```bash
-uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100 --cffdrs-year 2024
+uv run python -m src.ingestion.static_dataset --raw-alberta-csv path/to/fp-historical-wildfire-data.csv --target-count 100
 ```
 
-If you have your own fire records file:
+If you have your own normalized historical fire records JSON:
 
 ```bash
 uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
@@ -111,9 +114,9 @@ uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_record
 
 Notes:
 
-- Do not hard-code `--cffdrs-year 2025` for live builds. The currently available 2025 CFFDRS station file may contain no usable danger-index values, which produces zero records.
-- For live builds, prefer omitting `--cffdrs-year` and using the builder only when the current season has populated CFFDRS observations.
-- For reproducible historical builds, use `--fire-records` with a curated historical file and a CFFDRS year known to contain populated station observations.
+- The canonical build no longer uses FIRMS or Open-Meteo.
+- CFFDRS is supplementary. If the requested year is sparse or unavailable, the builder still works without it.
+- The raw Alberta CSV already contains the main weather and spread fields used for the benchmark.
 
 After building the dataset, you can train by running:
 

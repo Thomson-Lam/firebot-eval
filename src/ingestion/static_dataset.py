@@ -1,10 +1,11 @@
 """
-static_dataset.py - One-time snapshot export and offline environment parameter builder.
+static_dataset.py - Build frozen benchmark datasets from historical wildfire data.
 
-This module converts live ingestion sources into frozen benchmark artifacts:
-
-1. normalized snapshot records
-2. scenario parameter records for FireEnv episode setup
+Canonical path:
+1. load Alberta historical wildfire incidents from `data/static/`
+2. normalize them into snapshot records
+3. optionally enrich with CFFDRS fire-danger fields
+4. compute environment-variable records for FireEnv
 
 Run once, store the outputs, and train/evaluate only from the cached files.
 
@@ -15,15 +16,42 @@ Example:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import UTC, datetime
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = Path("data/static")
+DEFAULT_ALBERTA_CSV = DEFAULT_OUTPUT_DIR / "fp-historical-wildfire-data-2006-2025.csv"
+
+WIND_DIR_TO_DEG = {
+    "N": 0.0,
+    "NNE": 22.5,
+    "NE": 45.0,
+    "ENE": 67.5,
+    "E": 90.0,
+    "ESE": 112.5,
+    "SE": 135.0,
+    "SSE": 157.5,
+    "S": 180.0,
+    "SSW": 202.5,
+    "SW": 225.0,
+    "WSW": 247.5,
+    "W": 270.0,
+    "WNW": 292.5,
+    "NW": 315.0,
+    "NNW": 337.5,
+}
+
+FIRE_TYPE_FACTOR = {
+    "ground": 0.8,
+    "surface": 1.0,
+    "crown": 1.18,
+}
 
 
 @dataclass
@@ -43,6 +71,87 @@ def _norm(value: float, low: float, high: float) -> float:
     return _clamp((value - low) / (high - low), 0.0, 1.0)
 
 
+def _clean_str(value: object) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_float(value: object) -> float | None:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _parse_datetime(value: object) -> datetime | None:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        if "T" in text:
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        pass
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=UTC)
+        except ValueError:
+            continue
+    return None
+
+
+def _to_iso(value: datetime | None) -> str | None:
+    return value.isoformat() if value is not None else None
+
+
+def _parse_wind_direction(value: object) -> float | None:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return WIND_DIR_TO_DEG.get(text.upper())
+
+
+def _estimate_precipitation_mm(condition: str | None) -> float:
+    if condition is None:
+        return 0.0
+    normalized = condition.strip().lower()
+    if normalized == "rain showers":
+        return 2.0
+    if normalized == "cb wet":
+        return 1.0
+    return 0.0
+
+
+def _fuel_type_factor(fuel_type: str | None) -> float:
+    if not fuel_type:
+        return 1.0
+    fuel = fuel_type.strip().upper()
+    if (
+        fuel.startswith("C-")
+        or fuel.startswith("C")
+        or fuel.startswith("S-")
+        or fuel.startswith("S")
+    ):
+        return 1.12
+    if fuel.startswith("M-") or fuel.startswith("M"):
+        return 1.06
+    if fuel.startswith("O-1B"):
+        return 1.08
+    if fuel.startswith("O-"):
+        return 1.03
+    if fuel.startswith("D-"):
+        return 0.92
+    return 1.0
+
+
 def _canonical_record_id(fire: dict) -> str:
     fire_id = str(fire.get("fire_id", "unknown"))
     anchor = str(
@@ -52,57 +161,24 @@ def _canonical_record_id(fire: dict) -> str:
     return f"{fire_id}__{safe_time}"
 
 
-def _parse_iso_date(value: str | None) -> date | None:
-    if not value:
-        return None
-    text = str(value).strip()
-    try:
-        if "T" in text:
-            return datetime.fromisoformat(text.replace("Z", "+00:00")).date()
-        return datetime.strptime(text, "%Y-%m-%d").date()
-    except ValueError:
-        return None
-
-
-def _infer_snapshot_date(fire: dict) -> date | None:
-    return (
-        _parse_iso_date(fire.get("snapshot_date"))
-        or _parse_iso_date(fire.get("updated_at"))
-        or _parse_iso_date(fire.get("started_at"))
-    )
-
-
 def _dedupe_fires(fires: list[dict]) -> list[dict]:
     seen_ids: set[str] = set()
-    seen_cells: set[tuple[str, float, float]] = set()
     unique: list[dict] = []
     for fire in fires:
         fire_id = str(fire.get("fire_id", ""))
-        if fire_id and fire_id in seen_ids:
-            continue
-        lat = fire.get("latitude")
-        lon = fire.get("longitude")
-        if lat is None or lon is None:
-            continue
-        cell_key = (
-            str(fire.get("province", "OTHER")),
-            round(float(lat), 2),
-            round(float(lon), 2),
-        )
-        if cell_key in seen_cells:
+        if not fire_id or fire_id in seen_ids:
             continue
         seen_ids.add(fire_id)
-        seen_cells.add(cell_key)
         unique.append(fire)
     return unique
 
 
-def _fire_priority(fire: dict) -> tuple[int, float, str]:
-    source_rank = 2 if str(fire.get("source", "")).startswith("CWFIS") else 1
-    has_area = 1 if fire.get("area_hectares") not in (None, 0, 0.0, "") else 0
-    area = float(fire.get("area_hectares") or 0.0)
-    source = str(fire.get("source", "zzz"))
-    return (source_rank, has_area, area, source)
+def _fire_priority(fire: dict) -> tuple[float, float, float, str]:
+    spread = float(fire.get("observed_spread_rate_m_min") or 0.0)
+    size = float(fire.get("assessment_hectares") or fire.get("area_hectares") or 0.0)
+    year = float(fire.get("year") or 0.0)
+    fire_id = str(fire.get("fire_id", ""))
+    return (spread, size, year, fire_id)
 
 
 def _load_fire_records(path: Path) -> list[dict]:
@@ -111,124 +187,248 @@ def _load_fire_records(path: Path) -> list[dict]:
     return [record for record in records if isinstance(record, dict)]
 
 
+def _normalize_alberta_row(row: dict) -> dict | None:
+    year = _clean_str(row.get("YEAR"))
+    fire_number = _clean_str(row.get("FIRE_NUMBER"))
+    lat = _parse_float(row.get("LATITUDE"))
+    lon = _parse_float(row.get("LONGITUDE"))
+    assessment_dt = _parse_datetime(row.get("ASSESSMENT_DATETIME"))
+    assessment_hectares = _parse_float(row.get("ASSESSMENT_HECTARES"))
+    current_size = _parse_float(row.get("CURRENT_SIZE"))
+    spread_rate = _parse_float(row.get("FIRE_SPREAD_RATE"))
+    temp_c = _parse_float(row.get("TEMPERATURE"))
+    rh_pct = _parse_float(row.get("RELATIVE_HUMIDITY"))
+    wind_dir_deg = _parse_wind_direction(row.get("WIND_DIRECTION"))
+    wind_speed = _parse_float(row.get("WIND_SPEED"))
+
+    if not all([year, fire_number]) or lat is None or lon is None or assessment_dt is None:
+        return None
+
+    area_hectares = assessment_hectares if assessment_hectares not in (None, 0.0) else current_size
+    if area_hectares is None or spread_rate is None or temp_c is None or rh_pct is None:
+        return None
+    if wind_dir_deg is None or wind_speed is None:
+        return None
+
+    started_at = _parse_datetime(row.get("FIRE_START_DATE"))
+    discovered_at = _parse_datetime(row.get("DISCOVERED_DATE"))
+    reported_at = _parse_datetime(row.get("REPORTED_DATE"))
+    dispatch_at = _parse_datetime(row.get("DISPATCH_DATE"))
+    arrival_at = _parse_datetime(row.get("IA_ARRIVAL_AT_FIRE_DATE"))
+    firefighting_start = _parse_datetime(row.get("FIRE_FIGHTING_START_DATE"))
+
+    fire_id = f"AB-{year}-{fire_number}"
+    fire_name = _clean_str(row.get("FIRE_NAME")) or fire_id
+    fire_type = (_clean_str(row.get("FIRE_TYPE")) or "Surface").strip()
+    fuel_type = _clean_str(row.get("FUEL_TYPE"))
+    weather_over_fire = _clean_str(row.get("WEATHER_CONDITIONS_OVER_FIRE"))
+
+    return {
+        "record_id": fire_id,
+        "fire_id": fire_id,
+        "year": int(year),
+        "province": "AB",
+        "name": fire_name,
+        "source": "AB_HISTORICAL_WILDFIRE",
+        "status": "historical",
+        "snapshot_date": assessment_dt.date().isoformat(),
+        "snapshot_datetime": _to_iso(assessment_dt),
+        "started_at": _to_iso(started_at),
+        "updated_at": _to_iso(assessment_dt),
+        "latitude": lat,
+        "longitude": lon,
+        "area_hectares": float(area_hectares),
+        "assessment_hectares": assessment_hectares,
+        "current_size": current_size,
+        "size_class": _clean_str(row.get("SIZE_CLASS")),
+        "observed_spread_rate_m_min": spread_rate,
+        "temperature_c": temp_c,
+        "relative_humidity_pct": rh_pct,
+        "wind_direction_deg": wind_dir_deg,
+        "wind_speed_km_h": wind_speed,
+        "precipitation_mm": _estimate_precipitation_mm(weather_over_fire),
+        "fire_type": fire_type.lower(),
+        "fuel_type": fuel_type,
+        "weather_conditions_over_fire": weather_over_fire,
+        "fire_position_on_slope": _clean_str(row.get("FIRE_POSITION_ON_SLOPE")),
+        "fire_origin": _clean_str(row.get("FIRE_ORIGIN")),
+        "general_cause": _clean_str(row.get("GENERAL_CAUSE")),
+        "activity_class": _clean_str(row.get("ACTIVITY_CLASS")),
+        "true_cause": _clean_str(row.get("TRUE_CAUSE")),
+        "discovered_date": _to_iso(discovered_at),
+        "reported_date": _to_iso(reported_at),
+        "dispatch_date": _to_iso(dispatch_at),
+        "ia_arrival_at_fire_date": _to_iso(arrival_at),
+        "fire_fighting_start_date": _to_iso(firefighting_start),
+        "discovered_size": _parse_float(row.get("DISCOVERED_SIZE")),
+        "fire_fighting_start_size": _parse_float(row.get("FIRE_FIGHTING_START_SIZE")),
+        "initial_action_by": _clean_str(row.get("INITIAL_ACTION_BY")),
+        "ia_access": _clean_str(row.get("IA_ACCESS")),
+        "bucketing_on_fire": _clean_str(row.get("BUCKETING_ON_FIRE")),
+        "distance_from_water_source": _parse_float(row.get("DISTANCE_FROM_WATER_SOURCE")),
+    }
+
+
+def load_alberta_historical_fires(csv_path: Path) -> list[dict]:
+    if not csv_path.exists():
+        msg = f"Alberta historical wildfire CSV not found: {csv_path}"
+        raise FileNotFoundError(msg)
+
+    fires: list[dict] = []
+    with csv_path.open(newline="", encoding="utf-8-sig") as handle:
+        reader = csv.DictReader(handle)
+        for row in reader:
+            normalized = _normalize_alberta_row(row)
+            if normalized is not None:
+                fires.append(normalized)
+    logger.info("Loaded %s Alberta historical wildfire incidents", len(fires))
+    return fires
+
+
 def collect_candidate_fires(
     target_count: int,
-    include_firms: bool = False,
     fire_records_path: Path | None = None,
+    raw_alberta_csv: Path | None = None,
 ) -> list[dict]:
-    """Collect and prioritize candidate fire records for snapshot export."""
+    """Collect and prioritize historical fire records for snapshot export."""
     if fire_records_path is not None:
         fires = _load_fire_records(fire_records_path)
     else:
-        from src.ingestion.cwfis import get_cwfis_fires
-
-        fires = list(get_cwfis_fires())
-
-    if include_firms and fire_records_path is None:
-        try:
-            from src.ingestion.firms import fetch_firms_hotspots
-
-            fires.extend(fetch_firms_hotspots(day_range=5))
-        except Exception as exc:
-            logger.warning("Skipping FIRMS candidate collection: %s", exc)
+        fires = load_alberta_historical_fires(raw_alberta_csv or DEFAULT_ALBERTA_CSV)
 
     unique = _dedupe_fires(fires)
     unique.sort(key=_fire_priority, reverse=True)
     return unique[:target_count]
 
 
-def build_snapshot_record(fire: dict, *, stations: list[dict]) -> dict | None:
-    """Enrich one fire record into a normalized snapshot record."""
+def _hours_between(start: str | None, end: str | None) -> float | None:
+    start_dt = _parse_datetime(start)
+    end_dt = _parse_datetime(end)
+    if start_dt is None or end_dt is None:
+        return None
+    return round((end_dt - start_dt).total_seconds() / 3600.0, 2)
+
+
+def build_snapshot_record(fire: dict, *, stations: list[dict] | None = None) -> dict | None:
+    """Convert one historical fire record into a snapshot record."""
     from src.ingestion.cffdrs import get_cffdrs_for_location
-    from src.ingestion.weather import get_fire_weather
 
     lat = fire.get("latitude")
     lon = fire.get("longitude")
     if lat is None or lon is None:
         return None
 
-    source = str(fire.get("source", ""))
-    snapshot_date = _infer_snapshot_date(fire)
-    if source.startswith("CWFIS") and snapshot_date is None:
-        logger.warning("Skipping CWFIS fire without usable snapshot date: %s", fire.get("fire_id"))
-        return None
+    snapshot_date = fire.get("snapshot_date")
+    snapshot_dt = _parse_datetime(fire.get("snapshot_datetime"))
+    snapshot_day = snapshot_dt.date() if snapshot_dt is not None else None
 
-    weather = get_fire_weather(float(lat), float(lon))
-    cffdrs = get_cffdrs_for_location(
-        float(lat),
-        float(lon),
-        stations=stations,
-        target_date=snapshot_date,
-        max_date_offset_days=1,
-    )
-
-    if not weather or not cffdrs:
-        return None
-
-    if cffdrs.get("date_offset_days", 0) > 1:
-        return None
-
-    if source.startswith("CWFIS") and cffdrs.get("observation_date") is None:
-        return None
-
-    area_hectares = fire.get("area_hectares")
-    quality_flag = "measured"
-    if area_hectares in (None, ""):
-        frp = fire.get("frp_mw")
-        if frp is None:
-            return None
-        area_hectares = round(max(25.0, float(frp) * 2.5), 1)
-        quality_flag = "area_imputed_from_frp"
+    cffdrs = None
+    if stations:
+        cffdrs = get_cffdrs_for_location(
+            float(lat),
+            float(lon),
+            stations=stations,
+            target_date=snapshot_day,
+            max_date_offset_days=1,
+        )
 
     record = {
         "record_id": _canonical_record_id(fire),
         "fire_id": fire.get("fire_id"),
         "source": fire.get("source"),
-        "province": fire.get("province"),
+        "province": fire.get("province", "AB"),
+        "year": fire.get("year"),
         "name": fire.get("name"),
         "status": fire.get("status"),
-        "snapshot_date": snapshot_date.isoformat() if snapshot_date else None,
+        "snapshot_date": snapshot_date,
+        "snapshot_datetime": fire.get("snapshot_datetime"),
         "latitude": float(lat),
         "longitude": float(lon),
-        "area_hectares": float(area_hectares),
+        "area_hectares": float(fire["area_hectares"]),
+        "assessment_hectares": fire.get("assessment_hectares"),
+        "current_size": fire.get("current_size"),
+        "size_class": fire.get("size_class"),
         "started_at": fire.get("started_at"),
         "updated_at": fire.get("updated_at"),
-        "wind_speed_km_h": weather.get("wind_speed_km_h"),
-        "wind_direction_deg": weather.get("wind_direction_deg"),
-        "temperature_c": weather.get("temperature_c"),
-        "relative_humidity_pct": weather.get("relative_humidity_pct"),
-        "precipitation_mm": weather.get("precipitation_mm"),
-        "surface_pressure_hpa": weather.get("surface_pressure_hpa"),
-        "dew_point_c": weather.get("dew_point_c"),
-        "fwi": cffdrs.get("fwi"),
-        "isi": cffdrs.get("isi"),
-        "bui": cffdrs.get("bui"),
-        "dc": cffdrs.get("dc"),
-        "dmc": cffdrs.get("dmc"),
-        "ffmc": cffdrs.get("ffmc"),
-        "cffdrs_station_distance_km": cffdrs.get("distance_km"),
-        "cffdrs_station_id": cffdrs.get("source_station_id"),
-        "cffdrs_station_name": cffdrs.get("source_station"),
-        "cffdrs_observation_date": cffdrs.get("observation_date"),
-        "cffdrs_date_offset_days": cffdrs.get("date_offset_days"),
-        "temporal_alignment_status": "aligned"
-        if cffdrs.get("date_offset_days", 0) == 0
-        else "near_aligned",
-        "frp_mw": fire.get("frp_mw"),
-        "record_quality_flag": quality_flag,
+        "wind_speed_km_h": float(fire["wind_speed_km_h"]),
+        "wind_direction_deg": float(fire["wind_direction_deg"]),
+        "temperature_c": float(fire["temperature_c"]),
+        "relative_humidity_pct": float(fire["relative_humidity_pct"]),
+        "precipitation_mm": float(fire.get("precipitation_mm") or 0.0),
+        "observed_spread_rate_m_min": float(fire["observed_spread_rate_m_min"]),
+        "fire_type": fire.get("fire_type"),
+        "fuel_type": fire.get("fuel_type"),
+        "weather_conditions_over_fire": fire.get("weather_conditions_over_fire"),
+        "fire_position_on_slope": fire.get("fire_position_on_slope"),
+        "fire_origin": fire.get("fire_origin"),
+        "general_cause": fire.get("general_cause"),
+        "activity_class": fire.get("activity_class"),
+        "true_cause": fire.get("true_cause"),
+        "discovered_date": fire.get("discovered_date"),
+        "reported_date": fire.get("reported_date"),
+        "dispatch_date": fire.get("dispatch_date"),
+        "ia_arrival_at_fire_date": fire.get("ia_arrival_at_fire_date"),
+        "fire_fighting_start_date": fire.get("fire_fighting_start_date"),
+        "discovered_size": fire.get("discovered_size"),
+        "fire_fighting_start_size": fire.get("fire_fighting_start_size"),
+        "initial_action_by": fire.get("initial_action_by"),
+        "ia_access": fire.get("ia_access"),
+        "bucketing_on_fire": fire.get("bucketing_on_fire"),
+        "distance_from_water_source": fire.get("distance_from_water_source"),
+        "detection_delay_h": _hours_between(fire.get("started_at"), fire.get("discovered_date")),
+        "report_delay_h": _hours_between(fire.get("discovered_date"), fire.get("reported_date")),
+        "dispatch_delay_h": _hours_between(fire.get("reported_date"), fire.get("dispatch_date")),
+        "ia_travel_delay_h": _hours_between(
+            fire.get("dispatch_date"), fire.get("ia_arrival_at_fire_date")
+        ),
+        "record_quality_flag": "measured",
         "snapshot_generated_at": datetime.now(UTC).isoformat(),
     }
+
+    if cffdrs is not None:
+        record.update(
+            {
+                "fwi": cffdrs.get("fwi"),
+                "isi": cffdrs.get("isi"),
+                "bui": cffdrs.get("bui"),
+                "dc": cffdrs.get("dc"),
+                "dmc": cffdrs.get("dmc"),
+                "ffmc": cffdrs.get("ffmc"),
+                "cffdrs_station_distance_km": cffdrs.get("distance_km"),
+                "cffdrs_station_id": cffdrs.get("source_station_id"),
+                "cffdrs_station_name": cffdrs.get("source_station"),
+                "cffdrs_observation_date": cffdrs.get("observation_date"),
+                "cffdrs_date_offset_days": cffdrs.get("date_offset_days"),
+                "temporal_alignment_status": "aligned"
+                if cffdrs.get("date_offset_days", 0) == 0
+                else "near_aligned",
+            }
+        )
+    else:
+        record.update(
+            {
+                "fwi": None,
+                "isi": None,
+                "bui": None,
+                "dc": None,
+                "dmc": None,
+                "ffmc": None,
+                "cffdrs_station_distance_km": None,
+                "cffdrs_station_id": None,
+                "cffdrs_station_name": None,
+                "cffdrs_observation_date": None,
+                "cffdrs_date_offset_days": None,
+                "temporal_alignment_status": "not_joined",
+            }
+        )
 
     required_fields = (
         "wind_speed_km_h",
         "wind_direction_deg",
         "temperature_c",
         "relative_humidity_pct",
-        "precipitation_mm",
-        "fwi",
-        "isi",
-        "bui",
         "area_hectares",
+        "observed_spread_rate_m_min",
     )
     if any(record.get(field) is None for field in required_fields):
         return None
@@ -237,46 +437,64 @@ def build_snapshot_record(fire: dict, *, stations: list[dict]) -> dict | None:
 
 def compute_environment_parameters(snapshot: dict) -> dict:
     """Map one snapshot record into deterministic FireEnv parameter fields."""
+    observed_spread = float(snapshot["observed_spread_rate_m_min"])
     wind_speed = float(snapshot["wind_speed_km_h"])
     wind_dir_deg = float(snapshot["wind_direction_deg"])
     temp_c = float(snapshot["temperature_c"])
     rh_pct = float(snapshot["relative_humidity_pct"])
-    precip_mm = float(snapshot["precipitation_mm"])
-    fwi = float(snapshot["fwi"])
-    isi = float(snapshot["isi"])
-    bui = float(snapshot["bui"])
+    precip_mm = float(snapshot.get("precipitation_mm") or 0.0)
     area_hectares = float(snapshot["area_hectares"])
-    ffmc = float(snapshot.get("ffmc") or 85.0)
+    fire_type = str(snapshot.get("fire_type") or "surface").lower()
+    fuel_type = snapshot.get("fuel_type")
 
-    isi_norm = _norm(isi, 0.0, 25.0)
-    fwi_norm = _norm(fwi, 0.0, 40.0)
-    bui_norm = _norm(bui, 0.0, 120.0)
-    ffmc_norm = _norm(ffmc, 70.0, 96.0)
+    spread_norm = _norm(observed_spread, 0.0, 25.0)
     wind_norm = _norm(wind_speed, 0.0, 40.0)
-    temp_norm = _norm(temp_c, 5.0, 35.0)
-    rh_norm = _norm(rh_pct, 15.0, 90.0)
-    rain_norm = _norm(precip_mm, 0.0, 10.0)
-    area_norm = _norm(area_hectares, 0.0, 20000.0)
+    temp_norm = _norm(temp_c, 0.0, 35.0)
+    rh_norm = _norm(rh_pct, 10.0, 95.0)
+    rain_norm = _norm(precip_mm, 0.0, 5.0)
+    size_norm = _norm(area_hectares, 0.0, 2000.0)
 
-    dryness_score = _clamp(
-        0.45 * isi_norm + 0.25 * fwi_norm + 0.15 * bui_norm + 0.15 * ffmc_norm,
+    cffdrs_terms = [
+        snapshot.get("isi"),
+        snapshot.get("fwi"),
+        snapshot.get("bui"),
+        snapshot.get("ffmc"),
+    ]
+    cffdrs_present = any(value is not None for value in cffdrs_terms)
+    cffdrs_dryness = 0.0
+    if cffdrs_present:
+        isi_norm = _norm(float(snapshot.get("isi") or 0.0), 0.0, 25.0)
+        fwi_norm = _norm(float(snapshot.get("fwi") or 0.0), 0.0, 40.0)
+        bui_norm = _norm(float(snapshot.get("bui") or 0.0), 0.0, 120.0)
+        ffmc_norm = _norm(float(snapshot.get("ffmc") or 85.0), 70.0, 96.0)
+        cffdrs_dryness = _clamp(
+            0.4 * isi_norm + 0.25 * fwi_norm + 0.15 * bui_norm + 0.2 * ffmc_norm,
+            0.0,
+            1.0,
+        )
+
+    weather_score = _clamp(
+        0.45 * wind_norm + 0.2 * temp_norm + 0.35 * (1.0 - rh_norm),
         0.0,
         1.0,
     )
-    rh_factor = 1.0 - 0.65 * rh_norm
-    rain_factor = 1.0 - 0.55 * rain_norm
-    temp_factor = 0.85 + 0.35 * temp_norm
-    wind_factor = 0.9 + 0.85 * wind_norm
-    size_factor = 0.95 + 0.1 * area_norm
+    rain_factor = 1.0 - 0.5 * rain_norm
+    size_factor = 0.95 + 0.15 * size_norm
+    fire_type_factor = FIRE_TYPE_FACTOR.get(fire_type, 1.0)
+    fuel_factor = _fuel_type_factor(fuel_type)
 
     spread_score = _clamp(
-        dryness_score * rh_factor * rain_factor * temp_factor * wind_factor * size_factor,
+        (0.6 * spread_norm + 0.2 * weather_score + 0.1 * size_norm + 0.1 * cffdrs_dryness)
+        * rain_factor
+        * fire_type_factor
+        * fuel_factor,
         0.0,
         1.0,
     )
-    spread_rate_1h_m = round(150.0 + 2850.0 * spread_score, 1)
+
     base_spread_prob = round(_clamp(0.04 + 0.18 * spread_score, 0.04, 0.22), 4)
     wind_strength = round(_clamp(0.1 + 0.5 * wind_norm, 0.1, 0.6), 4)
+    spread_rate_1h_m = round(observed_spread * 60.0, 1)
 
     if spread_score < 0.33:
         severity_bucket = "low"
@@ -290,18 +508,23 @@ def compute_environment_parameters(snapshot: dict) -> dict:
         "fire_id": snapshot.get("fire_id"),
         "source": snapshot.get("source"),
         "province": snapshot.get("province"),
+        "year": snapshot.get("year"),
         "base_spread_prob": base_spread_prob,
         "severity_bucket": severity_bucket,
         "wind_dir_deg": round(wind_dir_deg, 2),
         "wind_strength": wind_strength,
         "spread_rate_1h_m": spread_rate_1h_m,
         "spread_score": round(spread_score, 4),
-        "dryness_score": round(dryness_score, 4),
-        "rh_factor": round(rh_factor, 4),
-        "rain_factor": round(rain_factor, 4),
-        "temp_factor": round(temp_factor, 4),
-        "wind_factor": round(wind_factor, 4),
+        "weather_score": round(weather_score, 4),
+        "cffdrs_dryness_score": round(cffdrs_dryness, 4),
         "size_factor": round(size_factor, 4),
+        "fire_type_factor": round(fire_type_factor, 4),
+        "fuel_factor": round(fuel_factor, 4),
+        "rain_factor": round(rain_factor, 4),
+        "observed_spread_rate_m_min": observed_spread,
+        "assessment_hectares": snapshot.get("assessment_hectares"),
+        "fire_type": snapshot.get("fire_type"),
+        "fuel_type": snapshot.get("fuel_type"),
         "record_quality_flag": snapshot.get("record_quality_flag", "measured"),
     }
 
@@ -310,25 +533,29 @@ def build_static_datasets(
     *,
     target_count: int = 100,
     output_dir: Path | None = None,
-    include_firms: bool = False,
     cffdrs_year: int | None = None,
     fire_records_path: Path | None = None,
+    raw_alberta_csv: Path | None = None,
 ) -> SnapshotBuildResult:
     """Run the one-time pipeline and write frozen benchmark artifacts."""
     output_dir = output_dir or DEFAULT_OUTPUT_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    from src.ingestion.cffdrs import fetch_cffdrs_stations
+    stations: list[dict] | None = None
+    if cffdrs_year is not None:
+        from src.ingestion.cffdrs import fetch_cffdrs_stations
 
-    stations = fetch_cffdrs_stations(year=cffdrs_year)
-    if not stations:
-        msg = "CFFDRS station download failed; cannot build static dataset"
-        raise RuntimeError(msg)
+        stations = fetch_cffdrs_stations(year=cffdrs_year)
+        if not stations:
+            logger.warning(
+                "CFFDRS station download failed for year %s; continuing without supplementary CFFDRS enrichment.",
+                cffdrs_year,
+            )
 
     candidates = collect_candidate_fires(
-        target_count=target_count * 2,
-        include_firms=include_firms,
+        target_count=max(target_count * 3, target_count),
         fire_records_path=fire_records_path,
+        raw_alberta_csv=raw_alberta_csv,
     )
     snapshots: list[dict] = []
     parameter_records: list[dict] = []
@@ -344,13 +571,13 @@ def build_static_datasets(
         parameter_records.append(params)
 
     snapshot_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "record_count": len(snapshots),
         "records": snapshots,
     }
     params_payload = {
-        "schema_version": 1,
+        "schema_version": 2,
         "generated_at": datetime.now(UTC).isoformat(),
         "record_count": len(parameter_records),
         "records": parameter_records,
@@ -365,7 +592,7 @@ def build_static_datasets(
     logger.info("Wrote %s scenario parameter records to %s", len(parameter_records), params_path)
     if not parameter_records:
         logger.warning(
-            "No scenario parameter records were built. Check whether fire sources returned records and whether CFFDRS provided usable danger indices for the selected year."
+            "No scenario parameter records were built. Check whether the Alberta historical file has valid assessment fields or whether your optional CFFDRS join is too sparse."
         )
     return SnapshotBuildResult(
         snapshots=snapshots, parameter_records=parameter_records, output_dir=output_dir
@@ -384,21 +611,22 @@ def main() -> None:
         help="Directory for snapshot and parameter JSON files",
     )
     parser.add_argument(
-        "--include-firms",
-        action="store_true",
-        help="Include FIRMS hotspots as fallback candidates when available",
-    )
-    parser.add_argument(
         "--cffdrs-year",
         type=int,
         default=None,
-        help="Override CFFDRS observation year for reproducible exports",
+        help="Optional CFFDRS observation year for supplementary danger-index enrichment",
     )
     parser.add_argument(
         "--fire-records",
         type=Path,
         default=None,
-        help="Optional JSON file of normalized fire records to use instead of live incident collection",
+        help="Optional JSON file of normalized fire records to use instead of the Alberta historical CSV",
+    )
+    parser.add_argument(
+        "--raw-alberta-csv",
+        type=Path,
+        default=DEFAULT_ALBERTA_CSV,
+        help="Path to the raw Alberta historical wildfire CSV",
     )
     args = parser.parse_args()
 
@@ -406,9 +634,9 @@ def main() -> None:
     result = build_static_datasets(
         target_count=args.target_count,
         output_dir=args.output_dir,
-        include_firms=args.include_firms,
         cffdrs_year=args.cffdrs_year,
         fire_records_path=args.fire_records,
+        raw_alberta_csv=args.raw_alberta_csv,
     )
     print(
         f"Built {len(result.parameter_records)} scenario parameter records in {result.output_dir}"

@@ -1,27 +1,57 @@
 # Data Pipeline
 
-This document describes the current benchmark data pipeline after the redesign away from XGBoost and toward a one-time static dataset plus offline environment-variable builder.
+This document describes the current benchmark data pipeline after the move away from live CWFIS-centered ingestion and XGBoost.
+
+The canonical path now uses the Alberta historical wildfire dataset stored under `data/static/` as the primary source for building `FireEnv` scenario records.
 
 ---
 
-## 1) Overview 
+## 1) Overview
 
 The benchmark pipeline has two stages:
 
-1. one-time ingestion and normalization into frozen snapshot records
-2. offline parameter building into cached environment-variable records for `FireEnv`
+1. normalize historical wildfire incidents into frozen snapshot records
+2. compute offline environment-variable records for `FireEnv`
 
 Training and evaluation should then use only the cached parameter dataset plus seeded RNG.
 
-The current pipeline still fetches live source data during the one-time build step unless you provide precollected historical fire records via `--fire-records`, but benchmark runs themselves should not call live APIs.
+Primary source hierarchy:
 
-The builder is now centered on CWFIS as the primary incident source. FIRMS remains supplementary.
+- primary: Alberta historical wildfire dataset
+- supplementary: CFFDRS fire-danger indices when an annual station file is available and usable
+- non-canonical: CWFIS live active fires and FIRMS hotspots
 
 ---
 
-## 2) Ingestion Modules
+## 2) Input Data Sources
 
-### 2.1 `src/ingestion/cffdrs.py`
+### 2.1 Alberta historical wildfire dataset
+
+Raw file path:
+
+- `data/static/fp-historical-wildfire-data-2006-2025.csv`
+
+This dataset is now the default primary input to `src/ingestion/static_dataset.py`.
+
+Important fields used directly by the pipeline:
+
+- incident identity: `YEAR`, `FIRE_NUMBER`, `FIRE_NAME`
+- location: `LATITUDE`, `LONGITUDE`
+- timing: `FIRE_START_DATE`, `ASSESSMENT_DATETIME`, `DISCOVERED_DATE`, `REPORTED_DATE`, `DISPATCH_DATE`, `IA_ARRIVAL_AT_FIRE_DATE`, `FIRE_FIGHTING_START_DATE`
+- fire state: `ASSESSMENT_HECTARES`, `CURRENT_SIZE`, `SIZE_CLASS`
+- spread/weather: `FIRE_SPREAD_RATE`, `TEMPERATURE`, `RELATIVE_HUMIDITY`, `WIND_DIRECTION`, `WIND_SPEED`, `WEATHER_CONDITIONS_OVER_FIRE`
+- fire context: `FIRE_TYPE`, `FUEL_TYPE`, `FIRE_POSITION_ON_SLOPE`, `FIRE_ORIGIN`
+- optional response context: `INITIAL_ACTION_BY`, `IA_ACCESS`, `BUCKETING_ON_FIRE`, `DISTANCE_FROM_WATER_SOURCE`
+
+Why this is now primary:
+
+- historical instead of live-only
+- provides assessment-time weather directly
+- provides observed spread rate directly
+- provides assessment-time size directly
+- removes dependence on ad hoc live weather reconstruction for canonical builds
+
+### 2.2 `src/ingestion/cffdrs.py`
 
 This module downloads annual CWFIS weather-station CSV data and parses:
 
@@ -31,218 +61,191 @@ This module downloads annual CWFIS weather-station CSV data and parses:
 - `dc`
 - `dmc`
 - `ffmc`
-- station weather values: `temp_c`, `rh_pct`, `ws_km_h`, `precip_mm`
 
-- `fetch_cffdrs_stations()` parses both fire-danger indices and station weather observations.
-- `get_cffdrs_for_location()` returns nearest-station metadata plus `fwi`, `isi`, `bui`, `dc`, `dmc`, and `ffmc`.
+Current role:
 
-### 2.2 `src/ingestion/cwfis.py`
+- supplementary enrichment only
+- if `--cffdrs-year` is passed and usable observations exist, the builder joins the nearest station by both distance and snapshot date
+- the benchmark no longer depends on CFFDRS being available to build records
 
-This module downloads the CWFIS active fires CSV and normalizes each row into a fire-event dict.
+### 2.3 `src/ingestion/cwfis.py`
 
-Normalized fields:
+This module still downloads live active fires from CWFIS.
 
-- `fire_id`
-- `province`
-- `name`
-- `status`
-- `severity`
-- `latitude`
-- `longitude`
-- `area_hectares`
-- `started_at`
-- `updated_at`
-- `source`
+Current role:
 
-- `severity` is derived from CWFIS status and is metadata only.
-- canonical benchmark severity is now computed offline by the environment-variable builder, not taken directly from CWFIS.
+- legacy / non-canonical
+- useful for live experiments or future non-Alberta extensions
+- not part of the canonical Alberta historical benchmark build
 
-### 2.3 `src/ingestion/firms.py`
+### 2.4 `src/ingestion/firms.py`
 
-This module fetches NASA FIRMS hotspot CSV data and normalizes each hotspot into a fire-event dict.
+This module still fetches NASA FIRMS hotspots.
 
-Normalized fields:
+Current role:
 
-- `fire_id`
-- `province`
-- `name`
-- `status`
-- `severity`
-- `latitude`
-- `longitude`
-- `area_hectares`
-- `frp_mw`
-- `confidence`
-- `satellite`
-- `started_at`
-- `updated_at`
-- `source`
+- supplementary / non-canonical
+- not used in the canonical Alberta historical benchmark build
+- may still be useful for exploratory validation or future data discovery
 
-- `province` is inferred from a rough BC/AB bounding-box rule.
-- `area_hectares` is missing from FIRMS and may need imputation during snapshot building.
-- `NASA_FIRMS_API_KEY` is required only if FIRMS is used.
+### 2.5 `src/ingestion/weather.py`
 
-### 2.4 `src/ingestion/weather.py`
+This module fetches current-hour weather from Open-Meteo.
 
-This module fetches current-hour weather from Open-Meteo for a fire latitude/longitude.
+Current role:
 
-Returns:
-
-- `wind_speed_km_h`
-- `wind_direction_deg`
-- `temperature_c`
-- `relative_humidity_pct`
-- `precipitation_mm`
-- `surface_pressure_hpa`
-- `dew_point_c`
-- `fetched_at`
-
-- Open-Meteo requires no API key.
-- these fields are used during one-time snapshot building, then cached.
-
-### 2.5 `src/ingestion/static_dataset.py`
-
-One-time builder script that converts source records into frozen benchmark artifacts.
-
-Outputs:
-
-- `snapshot_records.json`
-- `scenario_parameter_records.json`
-
-It also computes offline environment variables such as:
-
-- `base_spread_prob`
-- `severity_bucket`
-- `wind_dir_deg`
-- `wind_strength`
-- audit fields like `spread_rate_1h_m`, `spread_score`, `dryness_score`, and `record_quality_flag`
-
-It also enforces tighter acceptance criteria:
-
-- CWFIS records are preferred over FIRMS hotspots
-- CFFDRS must match by both nearest-station distance and snapshot-date tolerance
-- canonical records are rejected if required fire-danger fields are missing
+- legacy / non-canonical for Alberta historical builds
+- assessment-time weather now comes directly from the Alberta dataset
 
 ---
 
-## 3) Static Dataset Build Flow
+## 3) Canonical Build Flow
 
 ```text
-CWFIS incident records
--> optional FIRMS hotspot supplementation
--> deduplicated candidate fire records
--> weather enrichment from Open-Meteo
--> CFFDRS nearest-station plus snapshot-date matching
+Alberta historical wildfire CSV
+-> normalized historical fire records
+-> optional CFFDRS date-and-distance enrichment
 -> snapshot_records.json
--> offline environment-variable builder
+-> offline env-variable builder
 -> scenario_parameter_records.json
 -> FireEnv reset sampling
 -> RL train/eval from cached records only
 ```
 
-To run the dataset builder: 
+This path does not use FIRMS or Open-Meteo in the canonical benchmark build.
+
+---
+
+## 4) Snapshot Schema
+
+The builder writes `data/static/snapshot_records.json`.
+
+Each snapshot record represents one Alberta wildfire incident anchored at the initial assessment time.
+
+Core stored fields:
+
+- identity: `record_id`, `fire_id`, `year`, `name`, `province`, `source`
+- timing: `snapshot_date`, `snapshot_datetime`, `started_at`, `updated_at`
+- location: `latitude`, `longitude`
+- size: `area_hectares`, `assessment_hectares`, `current_size`, `size_class`
+- observed spread/weather: `observed_spread_rate_m_min`, `temperature_c`, `relative_humidity_pct`, `wind_direction_deg`, `wind_speed_km_h`, `precipitation_mm`
+- fire context: `fire_type`, `fuel_type`, `weather_conditions_over_fire`, `fire_position_on_slope`, `fire_origin`
+- cause/admin metadata: `general_cause`, `activity_class`, `true_cause`
+- response timing metadata: `detection_delay_h`, `report_delay_h`, `dispatch_delay_h`, `ia_travel_delay_h`
+- optional supplementary enrichment: `fwi`, `isi`, `bui`, `dc`, `dmc`, `ffmc`, station metadata
+
+Important notes:
+
+- `snapshot_date` is anchored to `ASSESSMENT_DATETIME`
+- `area_hectares` prefers `ASSESSMENT_HECTARES`, with `CURRENT_SIZE` as fallback
+- `precipitation_mm` is estimated from `WEATHER_CONDITIONS_OVER_FIRE`
+- CFFDRS fields may be `null` if supplementary enrichment is unavailable
+
+---
+
+## 5) Environment-Variable Builder
+
+The builder computes `data/static/scenario_parameter_records.json` from each snapshot record.
+
+Canonical env-facing fields:
+
+- `base_spread_prob`
+- `severity_bucket`
+- `wind_dir_deg`
+- `wind_strength`
+
+Stored audit fields:
+
+- `spread_rate_1h_m`
+- `spread_score`
+- `weather_score`
+- `cffdrs_dryness_score`
+- `size_factor`
+- `fire_type_factor`
+- `fuel_factor`
+- `rain_factor`
+- `observed_spread_rate_m_min`
+- `assessment_hectares`
+- `fire_type`
+- `fuel_type`
+- `record_quality_flag`
+
+### Builder logic
+
+The current builder uses a blended physics-informed rule:
+
+- dominant term: observed `fire_spread_rate`
+- supporting terms: wind, temperature, relative humidity, estimated precipitation, assessment size
+- optional supplementary term: CFFDRS dryness score from `ISI/FWI/BUI/FFMC`
+- modifiers: `fire_type` and `fuel_type`
+
+This is not a full Rothermel implementation. It is a benchmark-oriented, physics-informed calibration rule that keeps the simulator simple while grounding episode conditions in historical assessment data.
+
+---
+
+## 6) Mapping From Data to Environment Variables
+
+| Stored env field | Source fields | Builder logic | Used by environment |
+|---|---|---|---|
+| `base_spread_prob` | `observed_spread_rate_m_min`, weather, size, optional CFFDRS dryness, `fire_type`, `fuel_type` | derived from blended `spread_score` | primary spread probability in `_spread_fire()` |
+| `severity_bucket` | same fields as `base_spread_prob` | derived from `spread_score` thresholds | severity one-hot in observation and family matching |
+| `wind_dir_deg` | `wind_direction_deg` | pass-through from Alberta assessment weather | converted to `(wx, wy)` wind bias |
+| `wind_strength` | `wind_speed_km_h` | normalized and clipped from assessment wind speed | sets wind-bias magnitude |
+| `spread_rate_1h_m` | `observed_spread_rate_m_min` | direct conversion to `m/hour` for audit/logging | optional logging only |
+
+Audit-only intermediates:
+
+| Stored audit field | Source fields | Purpose |
+|---|---|---|
+| `spread_score` | spread + weather + size + optional CFFDRS + type/fuel modifiers | blended benchmark calibration score |
+| `weather_score` | wind, temperature, RH | weather contribution summary |
+| `cffdrs_dryness_score` | `ISI`, `FWI`, `BUI`, `FFMC` | supplementary dryness context |
+| `size_factor` | `assessment_hectares` | weak size modifier |
+| `fire_type_factor` | `fire_type` | fire-behavior modifier |
+| `fuel_factor` | `fuel_type` | fuel-based modifier |
+| `rain_factor` | `WEATHER_CONDITIONS_OVER_FIRE` -> `precipitation_mm` | precipitation damping |
+
+---
+
+## 7) Usage
+
+Build the canonical dataset from the Alberta historical CSV:
 
 ```bash
 uv run python -m src.ingestion.static_dataset --target-count 100
 ```
 
-Optional historical-record input:
+Build with optional supplementary CFFDRS enrichment:
+
+```bash
+uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025
+```
+
+Build from a pre-normalized historical JSON instead of the raw Alberta CSV:
 
 ```bash
 uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
 ```
 
-Year note:
+Override the raw Alberta CSV path if needed:
 
-- Do not rely on `--cffdrs-year 2025` for live builds unless you first verify that the requested station file contains populated fire-danger values for the records you want.
-- In current testing, the 2025 live station file loaded but had no usable `FWI` values for accepted records, so it produced zero scenario records.
-
----
-
-## 4) Mapping From Data Pipeline to Environment Variables
-
-The table below describes how ingested data fields map into the cached environment-variable record used by `FireEnv`.
-
-| Stored env field | Source pipeline fields | Builder logic | Used by environment |
-|---|---|---|---|
-| `base_spread_prob` | `wind_speed_km_h`, `temperature_c`, `relative_humidity_pct`, `precipitation_mm`, `fwi`, `isi`, `bui`, `ffmc`, `area_hectares` | computed in `compute_environment_parameters()` from normalized dryness, RH, rain, wind, temperature, and size factors | primary spread probability in `_spread_fire()` |
-| `severity_bucket` | same fields as `base_spread_prob` | derived from `spread_score` thresholds: low `<0.33`, medium `<0.66`, else high | severity one-hot in observation and family matching |
-| `wind_dir_deg` | `wind_direction_deg` from Open-Meteo snapshot | pass-through from snapshot record | converted to `(wx, wy)` wind bias |
-| `wind_strength` | `wind_speed_km_h` | normalized and clipped from wind speed | sets wind-bias magnitude |
-| `spread_rate_1h_m` | same fields as `base_spread_prob` | audit/logging value derived from `spread_score` | optional logging only |
-| `spread_score` | same fields as `base_spread_prob` | combined physics-informed intermediate score | audit/debug only |
-| `dryness_score` | `isi`, `fwi`, `bui`, `ffmc` | weighted dryness subscore | audit/debug only |
-| `rh_factor` | `relative_humidity_pct` | humidity damping factor | audit/debug only |
-| `rain_factor` | `precipitation_mm` | precipitation damping factor | audit/debug only |
-| `temp_factor` | `temperature_c` | mild heat multiplier | audit/debug only |
-| `wind_factor` | `wind_speed_km_h` | wind multiplier | audit/debug only |
-| `size_factor` | `area_hectares` | weak incident-size multiplier | audit/debug only |
-| `record_quality_flag` | `area_hectares`, `frp_mw` | marks measured vs imputed area path | audit/debug only |
-
-Snapshot acceptance metadata written to `snapshot_records.json`:
-
-| Snapshot field | Source | Purpose |
-|---|---|---|
-| `snapshot_date` | CWFIS or supplied historical fire record | anchor date for temporal matching |
-| `cffdrs_observation_date` | matched CFFDRS station record | actual danger-observation date |
-| `cffdrs_date_offset_days` | derived during matching | temporal gap between fire record and station observation |
-| `temporal_alignment_status` | derived during matching | `aligned` or `near_aligned` |
-
-More detailed field provenance:
-
-| Snapshot field | Source module | Notes |
-|---|---|---|
-| `wind_speed_km_h` | `src/ingestion/weather.py` | live during one-time build only |
-| `wind_direction_deg` | `src/ingestion/weather.py` | live during one-time build only |
-| `temperature_c` | `src/ingestion/weather.py` | live during one-time build only |
-| `relative_humidity_pct` | `src/ingestion/weather.py` | live during one-time build only |
-| `precipitation_mm` | `src/ingestion/weather.py` | live during one-time build only |
-| `fwi` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
-| `isi` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
-| `bui` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance |
-| `ffmc` | `src/ingestion/cffdrs.py` | nearest-station lookup with date tolerance, optional but used if available |
-| `area_hectares` | `src/ingestion/cwfis.py` or imputed in `src/ingestion/static_dataset.py` | FIRMS path may infer area from `frp_mw` |
-| `frp_mw` | `src/ingestion/firms.py` | optional metadata, used only for area imputation right now |
-
----
-
-## 5) Where Fire Metadata Comes From
-
-The current code supports two fire-incident inputs.
-
-| Source module | Fields returned | Caveats |
-|---|---|---|
-| `src/ingestion/cwfis.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `started_at`, `updated_at`, `source` | best current source for measured incident area |
-| `src/ingestion/firms.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `frp_mw`, `confidence`, `satellite`, `started_at`, `updated_at`, `source` | `area_hectares` missing; FIRMS is best treated as supplemental |
-
-For benchmark quality, CWFIS should usually be the primary source and FIRMS should be supplemental unless you provide a historical record file with a cleaner schema.
-
----
-
-## 6) Current Gaps and Constraints
-
-The redesigned pipeline is much closer to the intended benchmark workflow, but some limits remain:
-
-- source ingestion is still live during the one-time build unless `--fire-records` is used
-- the available public feeds are current/recent feeds, not a curated historical spread-label dataset
-- `area_hectares` may be imputed for FIRMS-derived records
-- current Open-Meteo enrichment is still fetched at build time and is not yet archived weather aligned to the same historical timestamp
-- there is still no terrain, fuel-model, or perimeter-growth dataset in the canonical pipeline
-
-This is acceptable for the current benchmark because the goal is to build realistic episode parameters for a fixed tactical RL environment, not an operational wildfire forecaster.
-
----
-
-## 7) Practical Benchmark End State
-
-The intended benchmark end state is:
-
-```text
-one-time ingestion run
--> normalized snapshot records
--> offline environment-variable builder
--> frozen scenario_parameter_records.json
--> train/eval using only cached records and seeded RNG
+```bash
+uv run python -m src.ingestion.static_dataset --raw-alberta-csv path/to/fp-historical-wildfire-data.csv --target-count 100
 ```
 
-This removes runtime drift, removes hidden fallback contamination during benchmark runs, and makes the benchmark pipeline auditable.
+Then train from the cached parameter file:
+
+```bash
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records.json
+```
+
+---
+
+## 8) Practical Constraints
+
+- Alberta historical data is Alberta-only, so the canonical benchmark is currently province-scoped rather than Canada-wide.
+- CFFDRS annual station files may be sparse or unavailable for some years; the builder treats them as optional.
+- FIRMS and CWFIS remain available in the repo but are no longer part of the canonical benchmark build path.
+- The benchmark still does not use terrain rasters, perimeter replay, or a full operational spread model.
+
+That is acceptable for the current paper because the goal is a reproducible tactical RL benchmark, not an operational wildfire decision-support system.
