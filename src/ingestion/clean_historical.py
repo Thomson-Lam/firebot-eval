@@ -16,7 +16,7 @@ REQUIRED_RAW_FIELDS = (
 )
 
 
-def clean_raw_historical_row(row: dict) -> dict | None:
+def clean_raw_historical_row_with_reason(row: dict) -> tuple[dict | None, str | None]:
     """Trim strings and drop rows missing required canonical fields.
 
     This stays intentionally lightweight: strip blanks, normalize empty strings,
@@ -32,12 +32,17 @@ def clean_raw_historical_row(row: dict) -> dict | None:
 
     for field in REQUIRED_RAW_FIELDS:
         if cleaned.get(field) in (None, ""):
-            return None
+            return None, f"missing_{field.lower()}"
 
     area_fields_present = cleaned.get("ASSESSMENT_HECTARES") not in (None, "") or cleaned.get(
         "CURRENT_SIZE"
     ) not in (None, "")
     if not area_fields_present:
-        return None
+        return None, "missing_area_fields"
 
+    return cleaned, None
+
+
+def clean_raw_historical_row(row: dict) -> dict | None:
+    cleaned, _reason = clean_raw_historical_row_with_reason(row)
     return cleaned

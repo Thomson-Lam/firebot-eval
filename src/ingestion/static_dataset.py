@@ -19,11 +19,20 @@ import argparse
 import csv
 import json
 import logging
+from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 
-from src.ingestion.clean_historical import clean_raw_historical_row
+from src.ingestion.clean_historical import clean_raw_historical_row_with_reason
+
+try:
+    from tqdm import tqdm
+except Exception:  # pragma: no cover - optional dependency
+
+    def tqdm(iterable, **_kwargs):
+        return iterable
+
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +211,7 @@ def _load_fire_records(path: Path) -> list[dict]:
 
 
 def _normalize_alberta_row(row: dict) -> dict | None:
-    cleaned = clean_raw_historical_row(row)
+    cleaned, _reason = clean_raw_historical_row_with_reason(row)
     if cleaned is None:
         return None
 
@@ -298,13 +307,46 @@ def load_alberta_historical_fires(csv_path: Path) -> list[dict]:
         raise FileNotFoundError(msg)
 
     fires: list[dict] = []
+    drop_reasons: Counter[str] = Counter()
+    yearly_total: Counter[int] = Counter()
+    yearly_kept: Counter[int] = Counter()
+    raw_rows = 0
     with csv_path.open(newline="", encoding="utf-8-sig") as handle:
         reader = csv.DictReader(handle)
-        for row in reader:
-            normalized = _normalize_alberta_row(row)
+        for row in tqdm(reader, desc="Cleaning historical rows", unit="row"):
+            raw_rows += 1
+            year_raw = _clean_str(row.get("YEAR"))
+            if year_raw and year_raw.isdigit():
+                yearly_total[int(year_raw)] += 1
+
+            cleaned, reason = clean_raw_historical_row_with_reason(row)
+            if cleaned is None:
+                drop_reasons[reason or "cleaning_failed"] += 1
+                continue
+
+            normalized = _normalize_alberta_row(cleaned)
             if normalized is not None:
                 fires.append(normalized)
+                yearly_kept[int(normalized["year"])] += 1
+            else:
+                drop_reasons["normalization_failed"] += 1
     logger.info("Loaded %s Alberta historical wildfire incidents", len(fires))
+    logger.info(
+        "Historical input rows: %s | kept: %s | dropped: %s",
+        raw_rows,
+        len(fires),
+        raw_rows - len(fires),
+    )
+    if drop_reasons:
+        for reason, count in drop_reasons.most_common(10):
+            logger.info("Dropped %s rows due to %s", count, reason)
+    for year in sorted(yearly_total):
+        logger.info(
+            "Year %s: kept %s / %s",
+            year,
+            yearly_kept.get(year, 0),
+            yearly_total[year],
+        )
     return fires
 
 
@@ -584,7 +626,7 @@ def build_static_datasets(
     parameter_records: list[dict] = []
     split_counts = {"train": 0, "val": 0, "holdout": 0}
 
-    for fire in candidates:
+    for fire in tqdm(candidates, desc="Building snapshots", unit="record"):
         split_name = fire.get("split")
         if split_name not in split_counts:
             continue

@@ -22,21 +22,11 @@ npm i -g lefthook
 lefthook install
 ```
 
-## Usage
+## Usage: Data Pipeline, Training and Eval 
 
-```bash
-# Train PPO agent (200k steps)
-uv run python -m src.models.train_rl_agent
+The data pipeline now uses the Alberta historical wildfire dataset in `data/static/` as its primary source.
 
-# Quick test (10k steps)
-uv run python -m src.models.train_rl_agent --timesteps 10000
-```
-
-## Data Pipeline 
-
-The canonical benchmark pipeline now uses the Alberta historical wildfire dataset in `data/static/` as its primary source.
-
-Source roles:
+Data sources:
 
 - Alberta historical wildfire dataset: primary incident, weather, spread-rate, and assessment-time source
 - CFFDRS: optional supplementary fire-danger enrichment
@@ -48,9 +38,10 @@ We build the static dataset at `src/ingestion/static_dataset.py`. The script:
 
 - loads historical incident rows from `data/static/fp-historical-wildfire-data-2006-2025.csv`
 - normalizes them into snapshot records anchored at assessment time
-- optionally enriches them with CFFDRS fields when `--cffdrs-year` is provided and usable
-- writes frozen and normalized `snapshot_records.json` of snapshot records from the data pipeline inside `data/static`
-- computes offline environment variables and write `scenario_parameter_records.json` in `data/static`. The environment variables written are:
+- applies lightweight cleaning (strip blank strings and drop unusable rows with missing required assessment-time fields)
+- optionally enriches with CFFDRS fields when `--cffdrs-year` is provided and usable
+- writes frozen and normalized `snapshot_records.json` and split snapshot files in `data/static`
+- computes offline environment variables and writes `scenario_parameter_records.json` plus split files in `data/static`. The environment variables written are:
     - `base_spread_prob`
     - `severity_bucket`
     - `wind_dir_deg`
@@ -58,19 +49,24 @@ We build the static dataset at `src/ingestion/static_dataset.py`. The script:
 - With the following extra fields stored:
     - `spread_rate_1h_m`
     - `spread_score`
-    - `dryness_score`
-    - `rh_factor`
+    - `weather_score`
+    - `cffdrs_dryness_score`
     - `rain_factor`
-    - `temp_factor`
-    - `wind_factor`
     - `size_factor`
+    - `fire_type_factor`
+    - `fuel_factor`
+    - `observed_spread_rate_m_min`
+    - `assessment_hectares`
+    - `fire_type`
+    - `fuel_type`
     - `record_quality_flag`
 
-> NOTE: the stored extra fields are for checking whether the data pipeline is computing the primary metrics correctly, and checking why a record got a high/low spread setting. These variables' influence and effect have been collapsed into `based_spread_prob`, `severity_bucket` and `wind_strength`. They are not included because we want to reduce the amount of confounding variables and keep the initial environment design as simple as possible; and to reduce chances of data leakage and models overfitting.
+> NOTE: the stored extra fields are for checking whether the data pipeline is computing the primary metrics correctly, and checking why a record got a high/low spread setting. Their influence has already been collapsed into `base_spread_prob`, `severity_bucket`, and `wind_strength` for the canonical environment. They are not directly consumed by the current `FireEnv` dynamics to keep the initial benchmark simple and reduce overfitting/confounding risk.
 
-For future improvements, consider using `dryness_score` to influence base burnout probability, `rain_factor` to damp spread for the whole episode, and `size_factor` if we think and agree that the incident size should affect the spread dynamics. However, these are arbitrary rates computed based on heuristics and introduce diminishing returns with a limited realistic environment. For simplicity, these will not be included.
+For future improvements, consider using `cffdrs_dryness_score` to influence burnout probability, `rain_factor` to damp spread for the whole episode, and `size_factor` if we agree incident size should affect spread dynamics. For now, these remain audit fields rather than direct transition inputs.
 
 Check `docs/data-pipeline.md` for how these variables are computed.
+
 
 ### How data is collected 
 
@@ -84,28 +80,25 @@ Each record is anchored at `ASSESSMENT_DATETIME`. The builder uses observed spre
 fire record -> snapshot record (`data/static/snapshot_records.json`) -> scenario (environment) parameter record (`data/static/scenario_parameter_records.json`).
 ```
 
+- CFFDRS is supplementary. If the requested year is sparse or unavailable, the builder still works without it.
+- The raw Alberta CSV already contains the main weather and spread fields used for the benchmark.
+
 For more details, check `docs/data-pipeline.md` 
 
 ### Usage from project root
 
-Default usage from the Alberta historical CSV:
+We run this command run to ingest our dataset (with a large cap to avoid split truncation):
 
 ```bash
-uv run python -m src.ingestion.static_dataset --target-count 100
+uv run python -m src.ingestion.static_dataset --target-count 50000 --cffdrs-year 2025 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
 ```
 
-`--target-count 100` means up to `100` records per split (`train`, `val`, `holdout`).
+If CFFDRS for the selected year is sparse, the builder still runs and writes records without supplementary CFFDRS enrichment.
 
-With optional supplementary CFFDRS enrichment:
-
-```bash
-uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025
-```
-
-With a custom raw Alberta CSV path:
+Optionally, test with a smaller target count:
 
 ```bash
-uv run python -m src.ingestion.static_dataset --raw-alberta-csv path/to/fp-historical-wildfire-data.csv --target-count 100
+uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
 ```
 
 If you have your own normalized historical fire records JSON:
@@ -114,19 +107,15 @@ If you have your own normalized historical fire records JSON:
 uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
 ```
 
-Notes:
-
-- The canonical build no longer uses FIRMS or Open-Meteo.
-- CFFDRS is supplementary. If the requested year is sparse or unavailable, the builder still works without it.
-- The raw Alberta CSV already contains the main weather and spread fields used for the benchmark.
+### Training 
 
 After building the dataset, you can train by running:
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records.json
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
 ```
 
-The cached scenario parameter file can then be consumed by `FireEnv` and PPO training.
+The scenario parameter file can then be consumed by `FireEnv` and PPO training.
 
 The builder also writes year-based split files for the benchmark:
 
@@ -134,8 +123,16 @@ The builder also writes year-based split files for the benchmark:
 - `val`: `2023`
 - `holdout`: `2024-2025`
 
-Recommended training command:
+Training command:
 
 ```bash
 uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
 ```
+
+General split benchmark evaluation (PPO + baselines):
+
+```bash
+uv run python -m src.models.evaluate_agents --agents ppo,greedy,random --train-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json --episodes 20 --seeds 42,43,44
+```
+
+The dataset builder prints cleaning/drop summaries to stdout and uses progress bars when `tqdm` is available.

@@ -114,6 +114,40 @@ Alberta historical wildfire CSV
 
 This path does not use FIRMS or Open-Meteo in the canonical benchmark build.
 
+The builder logs cleaning and drop diagnostics directly to stdout (with progress bars if `tqdm` is available) instead of writing a separate report artifact.
+
+### 3.1 Cleaning and vetting specification
+
+Cleaning is intentionally lightweight and is implemented in `src/ingestion/clean_historical.py`.
+
+Row-level cleaning behavior:
+
+- strip leading/trailing whitespace from all string fields
+- convert blank strings to `null`
+- drop rows missing any required core field:
+  - `YEAR`
+  - `FIRE_NUMBER`
+  - `LATITUDE`
+  - `LONGITUDE`
+  - `ASSESSMENT_DATETIME`
+  - `FIRE_SPREAD_RATE`
+  - `TEMPERATURE`
+  - `RELATIVE_HUMIDITY`
+  - `WIND_DIRECTION`
+  - `WIND_SPEED`
+- drop rows where both size fields are missing:
+  - `ASSESSMENT_HECTARES`
+  - `CURRENT_SIZE`
+
+Normalization-time vetting in `src/ingestion/static_dataset.py` additionally drops rows that fail parsing or mapping, such as invalid datetimes, non-numeric required values, and unresolved wind direction values.
+
+Current drop diagnostics printed to stdout include:
+
+- total rows, kept rows, dropped rows
+- top drop reasons (for example `missing_fire_spread_rate`, `normalization_failed`)
+- per-year kept/total counts
+- per-split built record counts
+
 ---
 
 ## 4) Snapshot Schema
@@ -232,10 +266,22 @@ uv run python -m src.ingestion.static_dataset --target-count 100
 
 Here, `--target-count 100` means up to `100` records per split, not `100` total records overall.
 
+For canonical benchmark builds, use a high cap to avoid truncating available records:
+
+```bash
+uv run python -m src.ingestion.static_dataset --target-count 50000 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
+```
+
 Build with optional supplementary CFFDRS enrichment:
 
 ```bash
 uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025
+```
+
+Canonical variant with CFFDRS enrichment:
+
+```bash
+uv run python -m src.ingestion.static_dataset --target-count 50000 --cffdrs-year 2025 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
 ```
 
 Build from a pre-normalized historical JSON instead of the raw Alberta CSV:
@@ -253,7 +299,7 @@ uv run python -m src.ingestion.static_dataset --raw-alberta-csv path/to/fp-histo
 Then train from the cached parameter file:
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records.json
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
 ```
 
 Recommended benchmark training/eval uses the split files directly:
