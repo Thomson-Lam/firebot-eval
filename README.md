@@ -90,7 +90,7 @@ For more details, check `docs/data-pipeline.md`
 We run this command run to ingest our dataset (with a large cap to avoid split truncation):
 
 ```bash
-uv run python -m src.ingestion.static_dataset --target-count 50000 --cffdrs-year 2025 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
+uv run python -m src.ingestion.static_dataset --target-count 50000 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
 ```
 
 If CFFDRS for the selected year is sparse, the builder still runs and writes records without supplementary CFFDRS enrichment.
