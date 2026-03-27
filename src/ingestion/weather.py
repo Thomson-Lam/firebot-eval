@@ -4,7 +4,7 @@ weather.py — Real-time fire weather ingestion via Open-Meteo API.
 No API key required. Open-Meteo is a free, open-source weather API.
 
 Given a fire's (latitude, longitude), this module returns the weather
-variables needed as features for the XGBoost spread model:
+variables used to build frozen snapshot records and offline environment variables:
   - wind_speed_km_h
   - wind_direction_deg
   - temperature_c
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 # Open-Meteo current-conditions endpoint (no key needed)
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 
-# Variables we need for the ML feature vector
+# Variables needed for the snapshot builder
 WEATHER_VARIABLES = [
     "temperature_2m",
     "relative_humidity_2m",
@@ -149,10 +149,30 @@ if __name__ == "__main__":
 
     # Test fires
     test_fires = [
-        {"fire_id": "BC-2026-001", "name": "Okanagan Ridge Fire",   "latitude": 49.9071,  "longitude": -119.496},
-        {"fire_id": "BC-2026-002", "name": "Kamloops Plateau Fire", "latitude": 50.6745,  "longitude": -120.3273},
-        {"fire_id": "BC-2026-003", "name": "Fraser Valley Approach","latitude": 49.3845,  "longitude": -121.4483},
-        {"fire_id": "AB-2026-001", "name": "Peace River Complex",   "latitude": 56.2370,  "longitude": -117.2900},
+        {
+            "fire_id": "BC-2026-001",
+            "name": "Okanagan Ridge Fire",
+            "latitude": 49.9071,
+            "longitude": -119.496,
+        },
+        {
+            "fire_id": "BC-2026-002",
+            "name": "Kamloops Plateau Fire",
+            "latitude": 50.6745,
+            "longitude": -120.3273,
+        },
+        {
+            "fire_id": "BC-2026-003",
+            "name": "Fraser Valley Approach",
+            "latitude": 49.3845,
+            "longitude": -121.4483,
+        },
+        {
+            "fire_id": "AB-2026-001",
+            "name": "Peace River Complex",
+            "latitude": 56.2370,
+            "longitude": -117.2900,
+        },
     ]
 
     print("Fetching fire weather from Open-Meteo...\n")

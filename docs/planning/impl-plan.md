@@ -22,7 +22,8 @@ Given a spreading wildfire on a grid and limited suppression resources, what tac
 
 - Do not claim operational readiness.
 - Do not claim superiority over real emergency protocols.
-- Treat real data ingestion and XGBoost as simulator calibration support only.
+- Treat real data ingestion as scenario-construction support only.
+- Do not claim empirical wildfire spread prediction.
 
 ### Canonical claim text
 
@@ -50,8 +51,8 @@ Any deviation must be explicitly labeled as an ablation and reported separately.
 flowchart TD
     A[Feasible Data Sources] --> B[Ingestion and Normalization]
     B --> C[Mandatory Snapshot Cache]
-    C --> D[XGBoost Spread Calibration]
-    D --> E[Scenario Parameters]
+    C --> D[Static Parameter Preprocessing]
+    D --> E[Scenario Parameter Records]
     E --> F[Enhanced RL Environment]
     F --> G[DQN A2C PPO]
     F --> H[Greedy Random]
@@ -86,7 +87,17 @@ Observation at step `t` contains:
 7. severity bucket (`low`, `medium`, `high`) encoded one-hot
 8. wind bias vector `(wx, wy)` if wind-bias mode enabled
 
+Frozen observation rule:
+
+- The canonical benchmark uses the encoded `fire_grid` plus scalar features listed above.
+- Multi-channel observation variants are allowed only as ablations or future work and must be reported separately.
+
 ## 4.2 Action set and exact semantics
+
+Action categories:
+
+- mobility: `MOVE_N`, `MOVE_S`, `MOVE_E`, `MOVE_W`
+- intervention: `DEPLOY_HELICOPTER`, `DEPLOY_CREW`
 
 Actions:
 
@@ -96,6 +107,11 @@ Actions:
 - `3`: `MOVE_W`
 - `4`: `DEPLOY_HELICOPTER`
 - `5`: `DEPLOY_CREW`
+
+Frozen action rule:
+
+- The canonical action space contains exactly these 6 actions.
+- `WAIT` is out of scope for the frozen benchmark and may appear only in ablations.
 
 Hard definitions:
 
@@ -119,9 +135,10 @@ Per-episode budgets:
 ## 4.3 Fire dynamics
 
 - Fire spreads stochastically from burning cells to neighbors.
-- Baseline spread probability is scenario-dependent from XGBoost calibration.
+- Baseline spread probability is scenario-dependent from precomputed episode parameters.
 - Heterogeneity mode for canonical runs: **wind bias enabled**.
 - Wind bias increases ignition probability downwind and decreases upwind.
+- Local flammability maps and control-tick versus fire-tick cadence are deferred to ablations or future work.
 
 ---
 
@@ -162,7 +179,7 @@ If unstable, adjust only `asset` and `burn` coefficients once, then freeze.
 
 - Ignition layout: `center`, `edge`, `corner`, `multi_cluster`
 - Severity: `low`, `medium`, `high`
-- Asset layout type: `A` (single critical cluster), `B` (two smaller critical clusters)
+- Asset layout type: `A` (one dense high-value cluster near moderate exposure), `B` (two smaller separated clusters with different exposure distances)
 
 ## 6.2 Training families (frozen)
 
@@ -189,13 +206,11 @@ Required methods:
 - **Greedy heuristic** (non-RL baseline)
 - **Random** (sanity floor)
 
-Do not include recurrent baseline unless hidden regime shifts are explicitly added and tested.
+Recurrent baselines are not included because we will not add and test hidden regime shifts. 
 
 ---
 
 ## 8) Benchmark Harness and Logging (Required Infrastructure)
-
-The harness is mandatory and must be built before full training runs.
 
 Requirements:
 
@@ -219,81 +234,69 @@ Secondary metrics:
 - resource efficiency
 - wasted deployment rate
 - held-out performance drop
+- normalized burn ratio
+
+Normalized burn ratio definition:
+
+- `final_burned_area_with_policy / final_burned_area_no_action_same_scenario`
+- The denominator comes from a no-action baseline rollout using the same scenario record and RNG seed.
+- This is an evaluation-only metric and does not modify the training reward.
 
 ---
 
-## 9) XGBoost Interface to Environment (Refined)
+## 9) Static Scenario Parameter Interface
 
-XGBoost is a calibration layer between ingested wildfire/weather snapshots and simulator episode parameters. It is not a control policy.
+The benchmark uses a static scenario-parameter dataset built offline from ingested wildfire, weather, and fire-danger records. These parameters are not predicted at runtime.
 
-## 9.1 Input feature contract with availability status
+## 9.1 Snapshot inputs used during preprocessing
 
 Canonical feature groups:
 
-1. **Weather (supported now)**
+1. **Weather**
    - `wind_speed_km_h`
    - `wind_direction_deg`
    - `temperature_c`
    - `relative_humidity_pct`
    - `precipitation_mm`
 
-2. **Fire danger indices (supported now)**
+2. **Fire danger indices**
    - `fwi`, `isi`, `bui`
 
-> TODO: check caveats to ensure data quality for pipeline! 
-
-1. **Incident context (supported now, with caveats)**
-   - `area_hectares` (often missing for FIRMS hotspots)
+3. **Incident context**
+   - `area_hectares`
    - `latitude`, `longitude`
-   - `province` (categorical coarse location)
+   - `province`
 
-4. **Useful optional features (partially supported or easy to add)**
-   - `frp_mw` from FIRMS hotspot intensity (partially available)
-   - `cffdrs_station_distance_km` (derive from nearest-station lookup)
-   - `dmc`, `dc`, `ffmc` (already available from CFFDRS response)
-   - simple temporal deltas from snapshots (e.g., 6h wind or RH change)
+4. **Optional retained metadata**
+   - `frp_mw`
+   - `cffdrs_station_distance_km`
+   - `dmc`, `dc`, `ffmc`
 
-5. **Do not include as canonical unless truly ingested**
-   - synthetic `slope_pct`
-   - synthetic `rh_trend_24h`
+Preprocessing rule:
 
-### Required ingestion/training code updates for optional features
+- The pipeline computes environment variables offline before writing the static scenario dataset.
+- Any variable used in canonical benchmarking must be present in the stored record; benchmark mode must fail fast on missing required fields.
 
-- Extend snapshot schema to persist `frp_mw`, station distance, and additional CFFDRS indices.
-- Update XGBoost feature builder to include encoded `province` and missingness flags (e.g., `has_area`, `has_frp`).
-- Remove hidden defaults during benchmark feature generation; fail fast if required canonical features are missing.
+## 9.2 Stored parameter record for the simulator
 
-## 9.2 Output contract for simulator (refined)
+For each scenario record, store:
 
-For each snapshot record, produce:
-
-1. `spread_intensity` in `[0, 1]` (primary scalar for fire-growth pressure)
-2. `spread_rate_1h_m` (interpretable spread scale for logging and sanity checks)
-3. `wind_dir_deg` (pass-through from weather input, not predicted)
-4. `wind_strength` in `[0, 1]` (normalized from observed wind speed)
-5. `severity_bucket` (`low`, `medium`, `high`) derived deterministically from `spread_intensity`
-
-Deterministic mapping to env parameters:
-
-- `base_spread_prob = 0.04 + 0.18 * spread_intensity`
-- severity bucket thresholds:
-  - low: `< 0.33`
-  - medium: `0.33-0.66`
-  - high: `> 0.66`
-- wind bias vector:
-  - `wx = wind_strength * cos(wind_dir_deg)`
-  - `wy = wind_strength * sin(wind_dir_deg)`
+1. `base_spread_prob`
+2. `severity_bucket` in `{low, medium, high}`
+3. `wind_dir_deg`
+4. `wind_strength` in `[0, 1]`
+5. optional logging fields such as `spread_rate_1h_m` if produced during preprocessing
 
 Episode sampling rule:
 
-- At reset, sample one snapshot-derived parameter record for the episode.
+- At reset, sample one cached parameter record for the episode.
 - Parameters remain fixed for the full episode in canonical runs.
 
 ## 9.3 Why this interface is chosen
 
-- Keeps RL benchmark focused on tactical decision-making rather than end-to-end forecasting claims.
-- Uses real ingested signals where available while preserving deterministic simulator reproducibility.
-- Avoids modeling wind direction with XGBoost when it is already directly observed.
+- Keeps the RL benchmark focused on tactical decision-making rather than learned spread prediction.
+- Uses ingested data to define realistic variation in episode conditions while preserving deterministic reproducibility.
+- Avoids runtime API dependence and avoids overclaiming forecasting capability.
 
 ---
 
@@ -315,8 +318,7 @@ flowchart TD
     C[Open-Meteo] --> N
     D[CFFDRS] --> N
     N --> S[Versioned Snapshot Cache]
-    S --> X[XGBoost Feature Builder]
-    X --> P[Env Parameter Records]
+    S --> P[Offline Env Parameter Builder]
     P --> E[RL Scenario Generator]
 ```
 
@@ -352,12 +354,14 @@ flowchart TD
 1. Freeze objective, protocol numbers, held-out split.
 2. Implement assets, budgets, cooldown semantics.
 3. Implement wind-bias heterogeneity.
-4. Implement mandatory benchmark harness/log schema/eval mode.
-5. Implement scenario generator with frozen train/test families.
-6. Implement snapshot cache loader and XGBoost-to-env parameter mapping.
-7. Run reward sanity pass and freeze coefficients.
-8. Run full multi-seed benchmarks for DQN/A2C/PPO + greedy/random.
-9. Aggregate plots/tables and write limitations.
+4. Define asset layouts `A` and `B` explicitly in the generator and docs.
+5. Implement mandatory benchmark harness/log schema/eval mode.
+6. Implement scenario generator with frozen train/test families.
+7. Implement snapshot cache loader and offline parameter-to-env mapping.
+8. Add evaluation-only normalized burn ratio reporting.
+9. Run reward sanity pass and freeze coefficients.
+10. Run full multi-seed benchmarks for DQN/A2C/PPO + greedy/random.
+11. Aggregate plots/tables and write limitations.
 
 ---
 

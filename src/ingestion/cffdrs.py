@@ -23,7 +23,7 @@ import csv
 import io
 import logging
 import math
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
 import httpx
 
@@ -43,8 +43,10 @@ def _haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
-    a = (math.sin(dlat / 2) ** 2
-         + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2)
+    a = (
+        math.sin(dlat / 2) ** 2
+        + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2) ** 2
+    )
     return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
 
 
@@ -53,8 +55,21 @@ def _parse_float(val: str) -> float | None:
     try:
         f = float(val)
         return None if f < -900 else f  # CWFIS uses -999 as missing value sentinel
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
+
+
+def _parse_station_date(val: str) -> date | None:
+    """Parse a station observation date from common CFFDRS formats."""
+    if not val:
+        return None
+    text = str(val).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%d-%b-%Y"):
+        try:
+            return datetime.strptime(text, fmt).date()
+        except ValueError:
+            continue
+    return None
 
 
 def fetch_cffdrs_stations(year: int | None = None) -> list[dict]:
@@ -110,22 +125,29 @@ def fetch_cffdrs_stations(year: int | None = None) -> list[dict]:
             "latitude": lat,
             "longitude": lon,
             "date": row.get("date", row.get("DATE", "")).strip(),
+            "observation_date": _parse_station_date(row.get("date", row.get("DATE", "")).strip()),
             # Core CFFDRS indices
-            "fwi":  _parse_float(row.get("fwi",  row.get("FWI",  ""))),
-            "isi":  _parse_float(row.get("isi",  row.get("ISI",  ""))),
-            "bui":  _parse_float(row.get("bui",  row.get("BUI",  ""))),
-            "dc":   _parse_float(row.get("dc",   row.get("DC",   ""))),
-            "dmc":  _parse_float(row.get("dmc",  row.get("DMC",  ""))),
+            "fwi": _parse_float(row.get("fwi", row.get("FWI", ""))),
+            "isi": _parse_float(row.get("isi", row.get("ISI", ""))),
+            "bui": _parse_float(row.get("bui", row.get("BUI", ""))),
+            "dc": _parse_float(row.get("dc", row.get("DC", ""))),
+            "dmc": _parse_float(row.get("dmc", row.get("DMC", ""))),
             "ffmc": _parse_float(row.get("ffmc", row.get("FFMC", ""))),
             # Observed weather at station
-            "temp_c":     _parse_float(row.get("temp", row.get("TEMP",  ""))),
-            "rh_pct":     _parse_float(row.get("rh",   row.get("RH",    ""))),
-            "ws_km_h":    _parse_float(row.get("ws",   row.get("WS",    ""))),
-            "precip_mm":  _parse_float(row.get("prec", row.get("PREC",  ""))),
+            "temp_c": _parse_float(row.get("temp", row.get("TEMP", ""))),
+            "rh_pct": _parse_float(row.get("rh", row.get("RH", ""))),
+            "ws_km_h": _parse_float(row.get("ws", row.get("WS", ""))),
+            "precip_mm": _parse_float(row.get("prec", row.get("PREC", ""))),
         }
         stations.append(station)
 
     logger.info(f"CFFDRS: loaded {len(stations)} BC/AB stations")
+    valid_fwi = sum(1 for stn in stations if stn.get("fwi") is not None)
+    if valid_fwi == 0 and stations:
+        logger.warning(
+            "CFFDRS station file loaded but contains no usable FWI values. "
+            "This often happens outside fire season or when the requested year has sparse observations."
+        )
     return stations
 
 
@@ -134,6 +156,8 @@ def get_cffdrs_for_location(
     longitude: float,
     stations: list[dict] | None = None,
     max_radius_km: float = 200.0,
+    target_date: date | None = None,
+    max_date_offset_days: int = 1,
 ) -> dict | None:
     """
     Find the nearest CWFIS weather station and return its CFFDRS indices.
@@ -154,15 +178,25 @@ def get_cffdrs_for_location(
     if not stations:
         return None
 
-    # Find nearest station with valid FWI data
+    # Find nearest station with valid FWI data, preferring date-aligned observations.
     best = None
     best_dist = float("inf")
+    best_date_offset = float("inf")
 
     for stn in stations:
         if stn.get("fwi") is None:
             continue  # skip stations with missing data
+        obs_date = stn.get("observation_date")
+        date_offset = 0
+        if target_date is not None:
+            if obs_date is None:
+                continue
+            date_offset = abs((obs_date - target_date).days)
+            if date_offset > max_date_offset_days:
+                continue
         dist = _haversine_km(latitude, longitude, stn["latitude"], stn["longitude"])
-        if dist < best_dist:
+        if date_offset < best_date_offset or (date_offset == best_date_offset and dist < best_dist):
+            best_date_offset = date_offset
             best_dist = dist
             best = stn
 
@@ -178,11 +212,15 @@ def get_cffdrs_for_location(
         "source_station_id": best["station_id"],
         "distance_km": round(best_dist, 1),
         "date": best["date"],
-        "fwi":  best["fwi"],
-        "isi":  best["isi"],
-        "bui":  best["bui"],
-        "dc":   best["dc"],
-        "dmc":  best["dmc"],
+        "observation_date": best["observation_date"].isoformat()
+        if best.get("observation_date")
+        else None,
+        "date_offset_days": int(best_date_offset) if target_date is not None else 0,
+        "fwi": best["fwi"],
+        "isi": best["isi"],
+        "bui": best["bui"],
+        "dc": best["dc"],
+        "dmc": best["dmc"],
         "ffmc": best["ffmc"],
     }
 
@@ -222,10 +260,30 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     test_fires = [
-        {"fire_id": "BC-2026-001", "name": "Okanagan Ridge Fire",   "latitude": 49.9071,  "longitude": -119.496},
-        {"fire_id": "BC-2026-002", "name": "Kamloops Plateau Fire", "latitude": 50.6745,  "longitude": -120.3273},
-        {"fire_id": "BC-2026-003", "name": "Fraser Valley Approach","latitude": 49.3845,  "longitude": -121.4483},
-        {"fire_id": "AB-2026-001", "name": "Peace River Complex",   "latitude": 56.2370,  "longitude": -117.2900},
+        {
+            "fire_id": "BC-2026-001",
+            "name": "Okanagan Ridge Fire",
+            "latitude": 49.9071,
+            "longitude": -119.496,
+        },
+        {
+            "fire_id": "BC-2026-002",
+            "name": "Kamloops Plateau Fire",
+            "latitude": 50.6745,
+            "longitude": -120.3273,
+        },
+        {
+            "fire_id": "BC-2026-003",
+            "name": "Fraser Valley Approach",
+            "latitude": 49.3845,
+            "longitude": -121.4483,
+        },
+        {
+            "fire_id": "AB-2026-001",
+            "name": "Peace River Complex",
+            "latitude": 56.2370,
+            "longitude": -117.2900,
+        },
     ]
 
     print("Fetching CFFDRS fire danger indices from CWFIS/NRCan...\n")
