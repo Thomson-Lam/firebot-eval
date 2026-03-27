@@ -1,26 +1,23 @@
-# Current Data Pipeline Findings
+# Data Pipeline
 
-This document summarizes how the current ingestion and XGBoost spread pipeline works in code today.
-
-It is intended to clarify the present behavior before the pipeline is redesigned into a static, snapshot-based workflow for reproducible paper experiments.
+This document describes the current benchmark data pipeline after the redesign away from XGBoost and toward a one-time static dataset plus offline environment-variable builder.
 
 ---
 
-## 1) Executive Summary
+## 1) Overview 
 
-The current pipeline is only partially static.
+The benchmark pipeline has two stages:
 
-- Fire incident metadata comes from live CWFIS or live NASA FIRMS fetches.
-- Weather inputs for spread prediction come from live Open-Meteo requests at prediction time.
-- Fire danger indices come from live CFFDRS station downloads and nearest-station lookup at prediction time.
-- Some XGBoost inputs are not ingested from real sources at all and are currently filled with fixed defaults.
-- The XGBoost model is trained on synthetic data, not on archived real wildfire snapshots.
+1. one-time ingestion and normalization into frozen snapshot records
+2. offline parameter building into cached environment-variable records for `FireEnv`
 
-As a result, the current system is useful as a working prototype, but it is not yet a fully reproducible benchmark pipeline.
+Training and evaluation should then use only the cached parameter dataset plus seeded RNG.
+
+The current pipeline still fetches live source data during the one-time build step unless you provide precollected historical fire records via `--fire-records`, but benchmark runs themselves should not call live APIs.
 
 ---
 
-## 2) Current Ingestion Modules
+## 2) Ingestion Modules
 
 ### 2.1 `src/ingestion/cffdrs.py`
 
@@ -34,17 +31,14 @@ This module downloads annual CWFIS weather-station CSV data and parses:
 - `ffmc`
 - station weather values: `temp_c`, `rh_pct`, `ws_km_h`, `precip_mm`
 
-Important implementation detail:
-
-- `fetch_cffdrs_stations()` parses both the fire danger indices and the station weather observations.
-- `get_cffdrs_for_location()` returns only nearest-station metadata plus `fwi`, `isi`, `bui`, `dc`, `dmc`, and `ffmc`.
-- The parsed station weather values are not currently returned through the public nearest-station lookup interface.
+- `fetch_cffdrs_stations()` parses both fire-danger indices and station weather observations.
+- `get_cffdrs_for_location()` returns nearest-station metadata plus `fwi`, `isi`, `bui`, `dc`, `dmc`, and `ffmc`.
 
 ### 2.2 `src/ingestion/cwfis.py`
 
 This module downloads the CWFIS active fires CSV and normalizes each row into a fire-event dict.
 
-Current normalized fields:
+Normalized fields:
 
 - `fire_id`
 - `province`
@@ -58,16 +52,14 @@ Current normalized fields:
 - `updated_at`
 - `source`
 
-Important implementation detail:
-
-- `severity` is derived from the CWFIS status/stage-of-control field.
-- `source` is always recorded as `CWFIS_NRCAN`.
+- `severity` is derived from CWFIS status and is metadata only.
+- canonical benchmark severity is now computed offline by the environment-variable builder, not taken directly from CWFIS.
 
 ### 2.3 `src/ingestion/firms.py`
 
 This module fetches NASA FIRMS hotspot CSV data and normalizes each hotspot into a fire-event dict.
 
-Current normalized fields:
+Normalized fields:
 
 - `fire_id`
 - `province`
@@ -84,19 +76,15 @@ Current normalized fields:
 - `updated_at`
 - `source`
 
-Important implementation details:
-
 - `province` is inferred from a rough BC/AB bounding-box rule.
-- `status` is set to `out_of_control` by assumption.
-- `severity` is derived from `frp_mw`.
-- `area_hectares` is always `None` because FIRMS does not provide incident area.
-- `source` is always recorded as `NASA_FIRMS_VIIRS`.
+- `area_hectares` is missing from FIRMS and may need imputation during snapshot building.
+- `NASA_FIRMS_API_KEY` is required only if FIRMS is used.
 
 ### 2.4 `src/ingestion/weather.py`
 
 This module fetches current-hour weather from Open-Meteo for a fire latitude/longitude.
 
-Current returned fields:
+Returns:
 
 - `wind_speed_km_h`
 - `wind_direction_deg`
@@ -107,171 +95,130 @@ Current returned fields:
 - `dew_point_c`
 - `fetched_at`
 
-Important implementation detail:
+- Open-Meteo requires no API key.
+- these fields are used during one-time snapshot building, then cached.
 
-- This is a live request made at prediction time, not a cached historical snapshot lookup.
+### 2.5 `src/ingestion/static_dataset.py`
 
----
+One-time builder script that converts source records into frozen benchmark artifacts.
 
-## 3) Current XGBoost Model Behavior
+Outputs:
 
-The XGBoost model lives in `src/models/spread_model.py`.
+- `snapshot_records.json`
+- `scenario_parameter_records.json`
 
-### 3.1 Inputs used by the model
+It also computes offline environment variables such as:
 
-The model uses these 11 features:
-
-- `wind_speed_km_h`
-- `wind_u`
-- `wind_v`
-- `temperature_c`
-- `relative_humidity_pct`
-- `fwi`
-- `isi`
-- `bui`
-- `area_hectares`
-- `slope_pct`
-- `rh_trend_24h`
-
-### 3.2 Outputs produced by the model
-
-The model predicts two spread-radius targets in meters:
-
-- `spread_1h_m`
-- `spread_3h_m`
-
-So the high-level understanding that the model outputs fire spread radius at `+1h` and `+3h` horizons is correct.
-
-### 3.3 Training data source
-
-The current model is not trained from real ingestion snapshots.
-
-- `generate_synthetic_dataset()` creates a synthetic training table.
-- `train_spread_model()` trains two XGBoost regressors on that synthetic data.
-- If saved models are missing, `_load_models()` trains them on the fly.
-
-This is a prototype convenience path, not a reproducible paper-grade data pipeline.
+- `base_spread_prob`
+- `severity_bucket`
+- `wind_dir_deg`
+- `wind_strength`
+- audit fields like `spread_rate_1h_m`, `spread_score`, `dryness_score`, and `record_quality_flag`
 
 ---
 
-## 4) Feature Provenance Table
+## 3) Static Dataset Build Flow
 
-The table below maps each current XGBoost input to where it actually comes from today.
+```text
+live fire sources or precollected historical fire records
+-> normalized fire records
+-> weather enrichment from Open-Meteo
+-> nearest-station CFFDRS enrichment
+-> snapshot_records.json
+-> offline environment-variable builder
+-> scenario_parameter_records.json
+-> FireEnv reset sampling
+-> RL train/eval from cached records only
+```
 
-| XGBoost input | Current source | How it is populated today | Notes |
+To run the dataset builder: 
+
+```bash
+uv run python -m src.ingestion.static_dataset --target-count 100
+```
+
+Optional historical-record input:
+
+```bash
+uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_records.json --target-count 100
+```
+
+---
+
+## 4) Mapping From Data Pipeline to Environment Variables
+
+The table below describes how ingested data fields map into the cached environment-variable record used by `FireEnv`.
+
+| Stored env field | Source pipeline fields | Builder logic | Used by environment |
 |---|---|---|---|
-| `wind_speed_km_h` | Open-Meteo | fetched by `get_fire_weather()` | live runtime fetch |
-| `wind_u` | derived | computed from wind speed and wind direction | not directly ingested |
-| `wind_v` | derived | computed from wind speed and wind direction | not directly ingested |
-| `temperature_c` | Open-Meteo | fetched by `get_fire_weather()` | live runtime fetch |
-| `relative_humidity_pct` | Open-Meteo | fetched by `get_fire_weather()` | live runtime fetch |
-| `fwi` | CFFDRS | nearest-station lookup via `get_cffdrs_for_location()` | live runtime lookup |
-| `isi` | CFFDRS | nearest-station lookup via `get_cffdrs_for_location()` | live runtime lookup |
-| `bui` | CFFDRS | nearest-station lookup via `get_cffdrs_for_location()` | live runtime lookup |
-| `area_hectares` | fire metadata | taken from `fire_data` when available | usually from CWFIS; FIRMS often has `None` |
-| `slope_pct` | no real ingestion | fixed default `5.0` | placeholder only |
-| `rh_trend_24h` | no real ingestion | fixed default `-8.0` | placeholder only |
+| `base_spread_prob` | `wind_speed_km_h`, `temperature_c`, `relative_humidity_pct`, `precipitation_mm`, `fwi`, `isi`, `bui`, `ffmc`, `area_hectares` | computed in `compute_environment_parameters()` from normalized dryness, RH, rain, wind, temperature, and size factors | primary spread probability in `_spread_fire()` |
+| `severity_bucket` | same fields as `base_spread_prob` | derived from `spread_score` thresholds: low `<0.33`, medium `<0.66`, else high | severity one-hot in observation and family matching |
+| `wind_dir_deg` | `wind_direction_deg` from Open-Meteo snapshot | pass-through from snapshot record | converted to `(wx, wy)` wind bias |
+| `wind_strength` | `wind_speed_km_h` | normalized and clipped from wind speed | sets wind-bias magnitude |
+| `spread_rate_1h_m` | same fields as `base_spread_prob` | audit/logging value derived from `spread_score` | optional logging only |
+| `spread_score` | same fields as `base_spread_prob` | combined physics-informed intermediate score | audit/debug only |
+| `dryness_score` | `isi`, `fwi`, `bui`, `ffmc` | weighted dryness subscore | audit/debug only |
+| `rh_factor` | `relative_humidity_pct` | humidity damping factor | audit/debug only |
+| `rain_factor` | `precipitation_mm` | precipitation damping factor | audit/debug only |
+| `temp_factor` | `temperature_c` | mild heat multiplier | audit/debug only |
+| `wind_factor` | `wind_speed_km_h` | wind multiplier | audit/debug only |
+| `size_factor` | `area_hectares` | weak incident-size multiplier | audit/debug only |
+| `record_quality_flag` | `area_hectares`, `frp_mw` | marks measured vs imputed area path | audit/debug only |
+
+More detailed field provenance:
+
+| Snapshot field | Source module | Notes |
+|---|---|---|
+| `wind_speed_km_h` | `src/ingestion/weather.py` | live during one-time build only |
+| `wind_direction_deg` | `src/ingestion/weather.py` | live during one-time build only |
+| `temperature_c` | `src/ingestion/weather.py` | live during one-time build only |
+| `relative_humidity_pct` | `src/ingestion/weather.py` | live during one-time build only |
+| `precipitation_mm` | `src/ingestion/weather.py` | live during one-time build only |
+| `fwi` | `src/ingestion/cffdrs.py` | nearest-station lookup |
+| `isi` | `src/ingestion/cffdrs.py` | nearest-station lookup |
+| `bui` | `src/ingestion/cffdrs.py` | nearest-station lookup |
+| `ffmc` | `src/ingestion/cffdrs.py` | nearest-station lookup, optional but used if available |
+| `area_hectares` | `src/ingestion/cwfis.py` or imputed in `src/ingestion/static_dataset.py` | FIRMS path may infer area from `frp_mw` |
+| `frp_mw` | `src/ingestion/firms.py` | optional metadata, used only for area imputation right now |
 
 ---
 
 ## 5) Where Fire Metadata Comes From
 
-The current code supports two live fire-incident sources.
+The current code supports two fire-incident inputs.
 
 | Source module | Fields returned | Caveats |
 |---|---|---|
-| `src/ingestion/cwfis.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `started_at`, `updated_at`, `source` | `severity` is derived from status |
-| `src/ingestion/firms.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `frp_mw`, `confidence`, `satellite`, `started_at`, `updated_at`, `source` | `province`, `status`, and `severity` are derived; `area_hectares` is `None` |
+| `src/ingestion/cwfis.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `started_at`, `updated_at`, `source` | best current source for measured incident area |
+| `src/ingestion/firms.py` | `fire_id`, `province`, `name`, `status`, `severity`, `latitude`, `longitude`, `area_hectares`, `frp_mw`, `confidence`, `satellite`, `started_at`, `updated_at`, `source` | `area_hectares` missing; FIRMS is best treated as supplemental |
 
-This means the quality and completeness of the feature row depends on which fire source is used.
-
-- CWFIS usually provides `area_hectares`.
-- FIRMS provides `frp_mw`, but the current XGBoost feature vector does not use `frp_mw`.
+For benchmark quality, CWFIS should usually be the primary source and FIRMS should be supplemental unless you provide a historical record file with a cleaner schema.
 
 ---
 
-## 6) Current Runtime Prediction Flow
+## 6) Current Gaps and Constraints
 
-The current prediction path is live and request-driven.
+The redesigned pipeline is much closer to the intended benchmark workflow, but some limits remain:
 
-```text
-fire record from CWFIS or FIRMS
--> select fire latitude/longitude (+ maybe area_hectares)
--> fetch live Open-Meteo weather for that location
--> fetch/download CFFDRS station data and do nearest-station lookup
--> build feature dict
--> derive wind_u and wind_v from wind speed + direction
--> fill any missing inputs with defaults
--> load XGBoost models from disk, or train them if absent
--> predict spread_1h_m and spread_3h_m
-```
+- source ingestion is still live during the one-time build unless `--fire-records` is used
+- the available public feeds are current/recent feeds, not a curated historical spread-label dataset
+- `area_hectares` may be imputed for FIRMS-derived records
+- there is still no terrain, fuel-model, or perimeter-growth dataset in the canonical pipeline
 
-The default/fallback behavior currently includes:
-
-- `area_hectares = 500.0` if missing
-- `slope_pct = 5.0`
-- `rh_trend_24h = -8.0`
-- fallback weather and danger-index defaults if live lookups fail
-
-This fallback behavior is convenient for demos, but it weakens reproducibility for benchmark experiments.
+This is acceptable for the current benchmark because the goal is to build realistic episode parameters for a fixed tactical RL environment, not an operational wildfire forecaster.
 
 ---
 
-## 7) Current Model Training Flow
+## 7) Practical Benchmark End State
 
-The current training path for the spread model is separate from the live ingestion path.
-
-```text
-synthetic feature generation in generate_synthetic_dataset()
--> synthetic labels spread_1h_m and spread_3h_m
--> train two XGBoost regressors
--> save spread_1h_model.joblib and spread_3h_model.joblib
--> runtime prediction later loads those saved models
-```
-
-This means the current ingestion modules are used mainly to support live inference-time feature assembly, not to build the XGBoost training dataset.
-
----
-
-## 8) Corrections to the Initial Understanding
-
-The following parts of the initial understanding are correct:
-
-- `cffdrs.py` does fetch `FWI`, `ISI`, `BUI`, `DC`, `DMC`, and `FFMC`.
-- `cwfis.py` does produce normalized fire metadata including `area_hectares`.
-- `firms.py` does produce normalized hotspot metadata including `frp_mw`, `confidence`, and `satellite`.
-- The XGBoost model does output spread radius in meters at `+1h` and `+3h` horizons.
-
-The following parts are not fully correct in the current code:
-
-- `wind_u` and `wind_v` do not come from an ingestion source; they are derived from wind speed and wind direction.
-- `slope_pct` is not currently ingested from terrain/GIS data; it is a fixed default placeholder.
-- `rh_trend_24h` is not currently built from historical weather snapshots; it is a fixed default placeholder.
-- The XGBoost model is not currently trained on snapshot-derived real data from CWFIS, CFFDRS, FIRMS, and weather ingestion.
-- The prediction pipeline still performs live runtime data access and default-based fallback behavior.
-
----
-
-## 9) Practical Implication for the Planned Redesign
-
-If the goal is a reproducible paper pipeline, the main gap is not just replacing live ingestion with one-time ingestion.
-
-The redesign must also decide how to handle features that are currently synthetic or defaulted:
-
-- `slope_pct`
-- `rh_trend_24h`
-- missing `area_hectares` for FIRMS hotspots
-- model training data provenance
-
-For a static benchmark pipeline, the intended end state should be:
+The intended benchmark end state is:
 
 ```text
 one-time ingestion run
--> normalized snapshot files
--> validated feature records
--> deterministic env/XGBoost parameter records
--> train/eval using only cached files and seeded RNG
+-> normalized snapshot records
+-> offline environment-variable builder
+-> frozen scenario_parameter_records.json
+-> train/eval using only cached records and seeded RNG
 ```
 
-That would remove runtime drift, remove silent fallback contamination, and make the paper pipeline auditable.
-
+This removes runtime drift, removes hidden fallback contamination during benchmark runs, and makes the benchmark pipeline auditable.

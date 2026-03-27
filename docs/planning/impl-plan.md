@@ -206,13 +206,11 @@ Required methods:
 - **Greedy heuristic** (non-RL baseline)
 - **Random** (sanity floor)
 
-Do not include recurrent baseline unless hidden regime shifts are explicitly added and tested.
+Recurrent baselines are not included because we will not add and test hidden regime shifts. 
 
 ---
 
 ## 8) Benchmark Harness and Logging (Required Infrastructure)
-
-The harness is mandatory and must be built before full training runs.
 
 Requirements:
 

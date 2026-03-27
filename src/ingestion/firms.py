@@ -14,11 +14,10 @@ Run this from backend/ to test:
 import csv
 import io
 import logging
+import os
 from datetime import UTC, datetime
 
 import httpx
-
-from src.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +70,7 @@ def _normalize_hotspot(row: dict, idx: int) -> dict | None:
         lat = float(row["latitude"])
         lon = float(row["longitude"])
         frp = float(row.get("frp", 0) or 0)
-        acq_date = row.get("acq_date", "")   # e.g. "2026-03-21"
+        acq_date = row.get("acq_date", "")  # e.g. "2026-03-21"
         acq_time = row.get("acq_time", "0000")  # e.g. "2315"
 
         # Build ISO timestamp from acquisition date + time
@@ -94,12 +93,12 @@ def _normalize_hotspot(row: dict, idx: int) -> dict | None:
             "fire_id": fire_id,
             "province": province,
             "name": f"Satellite Hotspot ({province}) #{idx + 1}",
-            "status": "out_of_control",   # FIRMS detects active burning
+            "status": "out_of_control",  # FIRMS detects active burning
             "severity": severity,
             "latitude": lat,
             "longitude": lon,
-            "area_hectares": None,         # FIRMS doesn't provide area
-            "frp_mw": frp,                 # Fire Radiative Power in megawatts
+            "area_hectares": None,  # FIRMS doesn't provide area
+            "frp_mw": frp,  # Fire Radiative Power in megawatts
             "confidence": row.get("confidence", "n"),
             "satellite": row.get("satellite", "N20"),
             "started_at": detected_at,
@@ -114,7 +113,7 @@ def _normalize_hotspot(row: dict, idx: int) -> dict | None:
 def fetch_firms_hotspots(
     day_range: int = DEFAULT_DAY_RANGE,
     bbox: str = CANADA_WEST_BBOX,
-    min_confidence: str = "n",   # "l"=low, "n"=nominal, "h"=high — filter low quality
+    min_confidence: str = "n",  # "l"=low, "n"=nominal, "h"=high — filter low quality
 ) -> list[dict]:
     """
     Fetch active fire hotspots from NASA FIRMS VIIRS over Western Canada.
@@ -129,7 +128,7 @@ def fetch_firms_hotspots(
 
     Rate limit: 1 API call. FIRMS allows 5000 calls/10min — this is very safe.
     """
-    api_key = settings.NASA_FIRMS_API_KEY
+    api_key = os.getenv("NASA_FIRMS_API_KEY", "")
     if not api_key or api_key in ("dummy_key", ""):
         logger.error("NASA_FIRMS_API_KEY is not set. Cannot fetch real fire data.")
         return []
@@ -182,6 +181,7 @@ def get_firms_fires() -> list[dict]:
 # ── Manual test ──────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
     import json
+
     logging.basicConfig(level=logging.INFO)
     print("Fetching NASA FIRMS hotspots over Western Canada...")
     fires = get_firms_fires()
