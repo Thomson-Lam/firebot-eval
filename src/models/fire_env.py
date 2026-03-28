@@ -12,6 +12,9 @@ A 25x25 cellular automata grid where:
 The agent must protect critical assets under a finite suppression budget.
 Scenarios vary by ignition pattern, severity, asset layout, and wind bias.
 
+Canonical benchmark mode consumes precomputed offline scenario parameter records.
+It does not fetch FIRMS/CWFIS/Open-Meteo/CFFDRS data at runtime.
+
 Usage:
     from src.models.fire_env import WildfireEnv, ScenarioConfig
     env = WildfireEnv(
@@ -176,7 +179,7 @@ def load_scenario_parameter_records(
     benchmark_mode: bool = True,
     expected_split: str | None = None,
 ) -> list[dict]:
-    """Load and validate cached scenario parameter records from a JSON file."""
+    """Load and validate precomputed scenario parameter records from a JSON file."""
     records_path = Path(path)
     payload = json.loads(records_path.read_text())
     records = payload.get("records", []) if isinstance(payload, dict) else payload

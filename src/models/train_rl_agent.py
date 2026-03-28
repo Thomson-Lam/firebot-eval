@@ -78,13 +78,14 @@ def train(
     scenario_dataset_path: str | None = None,
     val_dataset_path: str | None = None,
     holdout_dataset_path: str | None = None,
+    allow_legacy_dev_fallback: bool = False,
 ) -> None:
     """
     Train the PPO tactical agent.
 
     Args:
         total_timesteps:       Total env steps to train for.
-        spread_rate_m_per_min: Fire spread rate (from XGBoost) for training.
+        spread_rate_m_per_min: Legacy fixed spread rate used only in dev fallback mode.
         n_envs:                Parallel environments.
         seed:                  Random seed for reproducibility.
     """
@@ -102,7 +103,6 @@ def train(
     print("  FireGrid PPO Tactical Agent — Training")
     print("=" * 60)
     print(f"  Timesteps:    {total_timesteps:,}")
-    print(f"  Spread rate:  {spread_rate_m_per_min} m/min")
     print(f"  Environments: {n_envs} parallel")
     print("  Grid:         25×25 with critical assets")
     print("  Budgets:      heli=8, crew=20")
@@ -120,12 +120,21 @@ def train(
         env_kwargs["scenario_parameter_records"] = records
         env_kwargs["benchmark_mode"] = True
         env_kwargs["expected_split"] = "train"
+        print("  Runtime data: frozen offline scenario records (no live ingestion)")
         print(f"  Scenario records: {len(records)} from {scenario_dataset_path}")
     else:
+        if not allow_legacy_dev_fallback:
+            msg = (
+                "No training scenario dataset found. Canonical training requires precomputed "
+                "scenario_parameter_records_train.json. To run non-canonical dev mode, pass "
+                "--allow-legacy-dev-fallback with --spread-rate."
+            )
+            raise ValueError(msg)
         print(
             "  No scenario dataset found; running explicit legacy dev mode "
             "with --spread-rate fallback."
         )
+        print(f"  Legacy spread rate: {spread_rate_m_per_min} m/min")
         env_kwargs["benchmark_mode"] = False
         env_kwargs["base_spread_rate_m_per_min"] = spread_rate_m_per_min
     vec_env = make_vec_env(
@@ -186,7 +195,15 @@ if __name__ == "__main__":
         "--timesteps", type=int, default=200_000, help="Total training timesteps (default: 200000)"
     )
     parser.add_argument(
-        "--spread-rate", type=float, default=15.0, help="Fire spread rate in m/min (default: 15.0)"
+        "--spread-rate",
+        type=float,
+        default=15.0,
+        help="Legacy dev-mode fixed spread rate in m/min (default: 15.0)",
+    )
+    parser.add_argument(
+        "--allow-legacy-dev-fallback",
+        action="store_true",
+        help="Allow non-canonical fallback when no scenario dataset is available",
     )
     parser.add_argument(
         "--envs", type=int, default=4, help="Number of parallel environments (default: 4)"
@@ -220,4 +237,5 @@ if __name__ == "__main__":
         scenario_dataset_path=args.scenario_dataset,
         val_dataset_path=args.val_dataset,
         holdout_dataset_path=args.holdout_dataset,
+        allow_legacy_dev_fallback=args.allow_legacy_dev_fallback,
     )

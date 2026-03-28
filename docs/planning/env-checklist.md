@@ -48,9 +48,9 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 
 ## 6) Remove stale live-ingestion assumptions from env setup
 
-- [ ] Ensure canonical env setup does not assume FIRMS or CWFIS live-fire ingestion.
-- [ ] Ensure canonical env setup does not depend on Open-Meteo or runtime CFFDRS fetches.
-- [ ] Treat all spread/weather features as precomputed offline inputs.
+- [x] Ensure canonical env setup does not assume FIRMS or CWFIS live-fire ingestion.
+- [x] Ensure canonical env setup does not depend on Open-Meteo or runtime CFFDRS fetches.
+- [x] Treat all spread/weather features as precomputed offline inputs.
 
 ## 7) Add targeted tests for the new setup contract
 
