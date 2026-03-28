@@ -283,9 +283,11 @@ For each scenario record, store:
 
 1. `base_spread_prob`
 2. `severity_bucket` in `{low, medium, high}`
-3. `wind_dir_deg`
+3. `wind_direction` in `{N, NE, E, SE, S, SW, W, NW}`
 4. `wind_strength` in `[0, 1]`
-5. optional logging fields such as `spread_rate_1h_m` if produced during preprocessing
+5. `ignition_seed`
+6. `layout_seed`
+7. optional logging fields such as `spread_rate_1h_m` if produced during preprocessing
 
 Episode sampling rule:
 

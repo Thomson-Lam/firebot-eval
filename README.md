@@ -44,8 +44,11 @@ We build the static dataset at `src/ingestion/static_dataset.py`. The script:
 - computes offline environment variables and writes `scenario_parameter_records.json` plus split files in `data/static`. The environment variables written are:
     - `base_spread_prob`
     - `severity_bucket`
-    - `wind_dir_deg`
+    - `wind_direction` (8-direction string)
     - `wind_strength`
+    - `ignition_seed`
+    - `layout_seed`
+- writes seeded benchmark variants (`scenario_parameter_records_seeded.json` and `scenario_parameter_records_seeded_{train|val|holdout}.json`) for reproducible initialization; holdout seeded export is currently a single unique held-out record.
 - With the following extra fields stored:
     - `spread_rate_1h_m`
     - `spread_score`

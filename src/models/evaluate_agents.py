@@ -31,9 +31,9 @@ except Exception:  # pragma: no cover - optional dependency
         return iterable
 
 
-DEFAULT_TRAIN_DATASET = Path("data/static/scenario_parameter_records_train.json")
-DEFAULT_VAL_DATASET = Path("data/static/scenario_parameter_records_val.json")
-DEFAULT_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_holdout.json")
+DEFAULT_TRAIN_DATASET = Path("data/static/scenario_parameter_records_seeded_train.json")
+DEFAULT_VAL_DATASET = Path("data/static/scenario_parameter_records_seeded_val.json")
+DEFAULT_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_seeded_holdout.json")
 DEFAULT_PPO_MODEL = Path("src/models/tactical_ppo_agent.zip")
 
 

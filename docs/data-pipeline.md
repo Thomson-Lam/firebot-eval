@@ -157,6 +157,12 @@ Generated split files:
 - `data/static/scenario_parameter_records_train.json`
 - `data/static/scenario_parameter_records_val.json`
 - `data/static/scenario_parameter_records_holdout.json`
+- `data/static/scenario_parameter_records_seeded_train.json`
+- `data/static/scenario_parameter_records_seeded_val.json`
+- `data/static/scenario_parameter_records_seeded_holdout.json`
+
+Seeded parameter files include deterministic `ignition_seed` and `layout_seed` for reproducible environment initialization.
+For the current benchmark setup, `scenario_parameter_records_seeded_holdout.json` is intentionally reduced to one unique held-out record.
 
 Each snapshot record represents one selected Alberta wildfire incident row after deduplication/ranking.
 
@@ -196,14 +202,16 @@ Top-level JSON payload shape for output files:
 
 ## 5) Environment-Variable Builder
 
-The builder computes `data/static/scenario_parameter_records.json` from each snapshot record.
+The builder computes `data/static/scenario_parameter_records.json` from each snapshot record, then writes seeded benchmark variants in `data/static/scenario_parameter_records_seeded*.json`.
 
 Canonical env-facing fields:
 
 - `base_spread_prob`
 - `severity_bucket`
-- `wind_dir_deg`
+- `wind_direction` (8-direction string: `N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`)
 - `wind_strength`
+- `ignition_seed`
+- `layout_seed`
 
 Stored audit fields:
 
@@ -239,9 +247,11 @@ This is not a full Rothermel implementation. It is a benchmark-oriented, physics
 | Stored env field | Source fields | Builder logic | Used by environment |
 |---|---|---|---|
 | `base_spread_prob` | `observed_spread_rate_m_min`, weather, size, optional CFFDRS dryness, `fire_type`, `fuel_type` | derived from blended `spread_score` | primary spread probability in `_spread_fire()` |
-| `severity_bucket` | same fields as `base_spread_prob` | derived from `spread_score` thresholds | severity one-hot in observation and family matching |
-| `wind_dir_deg` | `wind_direction_deg` | pass-through from Alberta assessment weather | converted to `(wx, wy)` wind bias |
+| `severity_bucket` | same fields as `base_spread_prob` | derived from `spread_score` thresholds | severity one-hot in observation |
+| `wind_direction` | `wind_direction_deg` | mapped to 8-direction bins (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`) | converted to `(wx, wy)` wind bias |
 | `wind_strength` | `wind_speed_km_h` | normalized and clipped from assessment wind speed | sets wind-bias magnitude |
+| `ignition_seed` | `record_id`, `split` | deterministic stable hash | seeds ignition initialization RNG |
+| `layout_seed` | `record_id`, `split` | deterministic stable hash | seeds asset-layout initialization RNG |
 | `spread_rate_1h_m` | `observed_spread_rate_m_min` | direct conversion to `m/hour` for audit/logging | optional logging only |
 
 Audit-only intermediates:

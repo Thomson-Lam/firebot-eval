@@ -67,6 +67,18 @@ LEGACY_SEVERITY_SPREAD_PROB = {
 
 SEVERITY_INDEX = {"low": 0, "medium": 1, "high": 2}
 VALID_SPLITS = ("train", "val", "holdout")
+WIND_DIRECTIONS_8 = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+_DIAG = 0.70710678118
+WIND_VECTOR_BY_DIR = {
+    "N": (0.0, -1.0),
+    "NE": (_DIAG, -_DIAG),
+    "E": (1.0, 0.0),
+    "SE": (_DIAG, _DIAG),
+    "S": (0.0, 1.0),
+    "SW": (-_DIAG, _DIAG),
+    "W": (-1.0, 0.0),
+    "NW": (-_DIAG, -_DIAG),
+}
 
 PARAMETER_METADATA_FIELDS = (
     "record_id",
@@ -118,7 +130,7 @@ class ScenarioConfig:
     ignition: str = "center"
     severity: str = "medium"
     asset_layout: str = "A"
-    wind_dir_deg: float = 0.0  # 0 = wind blowing north->south
+    wind_direction: str = "N"
     wind_strength: float = 0.3  # [0, 1]
     base_spread_prob: float | None = None
     record_id: str | None = None
@@ -127,6 +139,9 @@ class ScenarioConfig:
         assert self.ignition in IGNITION_TYPES, f"Unknown ignition: {self.ignition}"
         assert self.severity in SEVERITY_LEVELS, f"Unknown severity: {self.severity}"
         assert self.asset_layout in ASSET_LAYOUTS, f"Unknown asset layout: {self.asset_layout}"
+        assert self.wind_direction in WIND_DIRECTIONS_8, (
+            f"Unknown wind direction: {self.wind_direction}"
+        )
 
     @property
     def spread_prob(self) -> float:
@@ -137,11 +152,8 @@ class ScenarioConfig:
     @property
     def wind_bias(self) -> tuple[float, float]:
         """Wind bias vector (wx, wy) for directional spread."""
-        rad = math.radians(self.wind_dir_deg)
-        return (
-            self.wind_strength * math.cos(rad),
-            self.wind_strength * math.sin(rad),
-        )
+        wx, wy = WIND_VECTOR_BY_DIR[self.wind_direction]
+        return (self.wind_strength * wx, self.wind_strength * wy)
 
     @property
     def severity_onehot(self) -> list[float]:
@@ -162,7 +174,7 @@ def random_scenario(
         ignition=ign,
         severity=sev,
         asset_layout=layout,
-        wind_dir_deg=float(rng.uniform(0, 360)),
+        wind_direction=WIND_DIRECTIONS_8[int(rng.integers(len(WIND_DIRECTIONS_8)))],
         wind_strength=float(rng.uniform(0.1, 0.6)),
     )
 
@@ -222,8 +234,9 @@ def load_scenario_parameter_records(
                 "split",
                 "base_spread_prob",
                 "severity_bucket",
-                "wind_dir_deg",
+                "wind_direction",
                 "wind_strength",
+                *(("ignition_seed", "layout_seed") if benchmark_mode else ()),
             )
             if record.get(field) is None
         ]
@@ -253,17 +266,12 @@ def load_scenario_parameter_records(
 
         try:
             base_spread_prob = float(record["base_spread_prob"])
-            wind_dir_deg = float(record["wind_dir_deg"])
             wind_strength = float(record["wind_strength"])
         except (TypeError, ValueError) as exc:
             errors.append(f"record[{idx}]: numeric parse failed ({exc})")
             continue
 
-        if not (
-            math.isfinite(base_spread_prob)
-            and math.isfinite(wind_dir_deg)
-            and math.isfinite(wind_strength)
-        ):
+        if not (math.isfinite(base_spread_prob) and math.isfinite(wind_strength)):
             errors.append(f"record[{idx}]: numeric fields must be finite floats")
             continue
 
@@ -273,8 +281,12 @@ def load_scenario_parameter_records(
             )
             continue
 
-        if not 0.0 <= wind_dir_deg <= 360.0:
-            errors.append(f"record[{idx}]: wind_dir_deg {wind_dir_deg} out of range [0.0, 360.0]")
+        wind_direction = str(record.get("wind_direction", "")).strip().upper()
+        if wind_direction not in WIND_DIRECTIONS_8:
+            errors.append(
+                f"record[{idx}]: invalid wind_direction '{record.get('wind_direction')}' "
+                f"(expected one of {list(WIND_DIRECTIONS_8)})"
+            )
             continue
 
         if not 0.0 <= wind_strength <= 1.0:
@@ -304,7 +316,7 @@ def load_scenario_parameter_records(
         normalized["split"] = split
         normalized["severity_bucket"] = severity
         normalized["base_spread_prob"] = base_spread_prob
-        normalized["wind_dir_deg"] = wind_dir_deg
+        normalized["wind_direction"] = wind_direction
         normalized["wind_strength"] = wind_strength
         if normalized.get("ignition_seed") is not None:
             normalized["ignition_seed"] = int(normalized["ignition_seed"])
@@ -453,7 +465,7 @@ def scenario_from_parameter_record(
         ignition=ignition,
         severity=severity,
         asset_layout=asset_layout,
-        wind_dir_deg=float(record["wind_dir_deg"]),
+        wind_direction=str(record["wind_direction"]),
         wind_strength=float(record["wind_strength"]),
         base_spread_prob=float(record["base_spread_prob"]),
         record_id=str(record["record_id"]),
@@ -574,6 +586,18 @@ class WildfireEnv(gym.Env):
                 raise ValueError(msg)
             if self.expected_split is None:
                 self.expected_split = next(iter(record_splits))
+            missing_init = [
+                idx
+                for idx, record in enumerate(self.scenario_parameter_records)
+                if record.get("ignition_seed") is None or record.get("layout_seed") is None
+            ]
+            if missing_init:
+                msg = (
+                    "benchmark_mode=True requires initialization seeds on all records "
+                    f"(missing ignition_seed/layout_seed in {len(missing_init)} record(s)). "
+                    "Use scenario_parameter_records_seeded_*.json artifacts."
+                )
+                raise ValueError(msg)
 
         # Scenario (may be overridden each reset if randomize_scenario=True)
         if scenario is not None:
@@ -781,6 +805,13 @@ class WildfireEnv(gym.Env):
 
         ignition_seed = record.get("ignition_seed")
         layout_seed = record.get("layout_seed")
+
+        if self.benchmark_mode and (ignition_seed is None or layout_seed is None):
+            msg = (
+                "benchmark_mode=True requires per-record ignition_seed and layout_seed "
+                "for reproducible initialization."
+            )
+            raise RuntimeError(msg)
 
         if ignition_seed is None and reset_seed is not None:
             ignition_seed = _stable_seed(record_id, reset_seed, "ignition")

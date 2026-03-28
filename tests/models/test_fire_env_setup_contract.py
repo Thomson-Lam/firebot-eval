@@ -13,8 +13,10 @@ def _record(**overrides):
         "split": "train",
         "base_spread_prob": 0.14,
         "severity_bucket": "medium",
-        "wind_dir_deg": 90.0,
+        "wind_direction": "E",
         "wind_strength": 0.35,
+        "ignition_seed": 101,
+        "layout_seed": 202,
         "fire_id": "AB-2020-001",
         "year": 2020,
         "source": "AB_HISTORICAL_WILDFIRE",
@@ -53,6 +55,14 @@ def test_schema_validation_checks_domains_and_ranges(tmp_path):
         load_scenario_parameter_records(path, benchmark_mode=True, expected_split="train")
 
 
+def test_schema_validation_rejects_invalid_wind_direction(tmp_path):
+    path = tmp_path / "records.json"
+    _write_records(path, [_record(wind_direction="NORTH")])
+
+    with pytest.raises(ValueError, match="invalid wind_direction"):
+        load_scenario_parameter_records(path, benchmark_mode=True, expected_split="train")
+
+
 def test_dev_mode_warns_and_skips_invalid_records(tmp_path, caplog):
     path = tmp_path / "records.json"
     _write_records(path, [_record(), _record(record_id="bad", split="unexpected")])
@@ -85,7 +95,7 @@ def test_benchmark_mode_reset_keeps_record_driven_path():
 def test_active_scenario_uses_cached_parameter_values():
     record = _record(
         severity_bucket="high",
-        wind_dir_deg=123.0,
+        wind_direction="SW",
         wind_strength=0.57,
         base_spread_prob=0.2,
     )
@@ -99,9 +109,18 @@ def test_active_scenario_uses_cached_parameter_values():
     env.reset(seed=7)
 
     assert env.scenario.severity == "high"
-    assert env.scenario.wind_dir_deg == pytest.approx(123.0)
+    assert env.scenario.wind_direction == "SW"
     assert env.scenario.wind_strength == pytest.approx(0.57)
     assert env.scenario.spread_prob == pytest.approx(0.2)
+
+
+def test_benchmark_mode_requires_initialization_seeds():
+    with pytest.raises(ValueError, match="requires initialization seeds"):
+        WildfireEnv(
+            scenario_parameter_records=[_record(ignition_seed=None)],
+            benchmark_mode=True,
+            expected_split="train",
+        )
 
 
 def test_split_isolation_on_loader_expected_split(tmp_path):

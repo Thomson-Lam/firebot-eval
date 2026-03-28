@@ -18,14 +18,15 @@ logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 MODEL_SAVE_PATH = Path(__file__).parent / "tactical_ppo_agent"
-DEFAULT_SCENARIO_DATASET = Path("data/static/scenario_parameter_records_train.json")
+DEFAULT_SCENARIO_DATASETS = (Path("data/static/scenario_parameter_records_seeded_train.json"),)
 
 
 def _resolve_dataset_path(path: str | None) -> str | None:
     if path:
         return path
-    if DEFAULT_SCENARIO_DATASET.exists():
-        return str(DEFAULT_SCENARIO_DATASET)
+    for candidate in DEFAULT_SCENARIO_DATASETS:
+        if candidate.exists():
+            return str(candidate)
     return None
 
 
@@ -115,8 +116,9 @@ def train(
         if not allow_legacy_dev_fallback:
             msg = (
                 "No training scenario dataset found. Canonical training requires precomputed "
-                "scenario_parameter_records_train.json. To run non-canonical dev mode, pass "
-                "--allow-legacy-dev-fallback with --spread-rate."
+                "scenario_parameter_records_seeded_train.json (or explicit equivalent). "
+                "To run non-canonical dev mode, pass --allow-legacy-dev-fallback with "
+                "--spread-rate."
             )
             raise ValueError(msg)
         print(
@@ -207,13 +209,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--val-dataset",
         type=str,
-        default="data/static/scenario_parameter_records_val.json",
+        default="data/static/scenario_parameter_records_seeded_val.json",
         help="Path to cached validation scenario parameter JSON dataset",
     )
     parser.add_argument(
         "--holdout-dataset",
         type=str,
-        default="data/static/scenario_parameter_records_holdout.json",
+        default="data/static/scenario_parameter_records_seeded_holdout.json",
         help="Path to cached holdout scenario parameter JSON dataset",
     )
     args = parser.parse_args()

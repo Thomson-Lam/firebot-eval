@@ -193,16 +193,16 @@ For each cached scenario record, store:
 
 1. `base_spread_prob`
 2. `severity_bucket`
-3. `wind_dir_deg`
+3. `wind_direction` in `{N, NE, E, SE, S, SW, W, NW}`
 4. `wind_strength`
-5. optional logging fields such as `spread_rate_1h_m`
+5. `ignition_seed`
+6. `layout_seed`
+7. optional logging fields such as `spread_rate_1h_m`
 
 Deterministic env mapping:
 
 - severity is encoded one-hot in the observation from `severity_bucket`
-- wind vector:
-  - `wx = wind_strength * cos(wind_dir_deg)`
-  - `wy = wind_strength * sin(wind_dir_deg)`
+- wind vector is looked up from the 8-direction bin and scaled by `wind_strength`
 - `base_spread_prob` is consumed directly by the environment spread rule
 
 Episode rule:
