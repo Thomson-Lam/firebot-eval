@@ -14,7 +14,10 @@ Scenarios vary by ignition pattern, severity, asset layout, and wind bias.
 
 Usage:
     from src.models.fire_env import WildfireEnv, ScenarioConfig
-    env = WildfireEnv(scenario=ScenarioConfig(ignition="edge", severity="high"))
+    env = WildfireEnv(
+        scenario=ScenarioConfig(ignition="edge", severity="high"),
+        benchmark_mode=False,
+    )
     obs, info = env.reset()
     obs, reward, done, truncated, info = env.step(action)
 """
@@ -22,6 +25,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -29,6 +33,8 @@ from pathlib import Path
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+
+logger = logging.getLogger(__name__)
 
 # Cell types
 UNBURNED = 0
@@ -132,15 +138,129 @@ def random_scenario(
     )
 
 
-def load_scenario_parameter_records(path: str | Path) -> list[dict]:
-    """Load cached scenario parameter records from a JSON file."""
+def load_scenario_parameter_records(path: str | Path, *, benchmark_mode: bool = True) -> list[dict]:
+    """Load and validate cached scenario parameter records from a JSON file."""
     records_path = Path(path)
     payload = json.loads(records_path.read_text())
     records = payload.get("records", []) if isinstance(payload, dict) else payload
     if not isinstance(records, list):
         msg = f"Invalid scenario parameter dataset: {records_path}"
         raise ValueError(msg)
-    return [record for record in records if isinstance(record, dict)]
+
+    valid_splits = {"train", "val", "holdout"}
+    valid_severities = set(SEVERITY_LEVELS)
+    validated: list[dict] = []
+    errors: list[str] = []
+
+    for idx, record in enumerate(records):
+        if not isinstance(record, dict):
+            errors.append(f"record[{idx}]: expected object, got {type(record).__name__}")
+            continue
+
+        missing = [
+            field
+            for field in (
+                "record_id",
+                "split",
+                "base_spread_prob",
+                "severity_bucket",
+                "wind_dir_deg",
+                "wind_strength",
+            )
+            if record.get(field) is None
+        ]
+        if missing:
+            errors.append(f"record[{idx}]: missing required fields {missing}")
+            continue
+
+        record_id = str(record.get("record_id", "")).strip()
+        if not record_id:
+            errors.append(f"record[{idx}]: record_id must be non-empty")
+            continue
+
+        split = str(record.get("split", "")).strip().lower()
+        if split not in valid_splits:
+            errors.append(
+                f"record[{idx}]: invalid split '{record.get('split')}' (expected one of {sorted(valid_splits)})"
+            )
+            continue
+
+        severity = str(record.get("severity_bucket", "")).strip().lower()
+        if severity not in valid_severities:
+            errors.append(
+                f"record[{idx}]: invalid severity_bucket "
+                f"'{record.get('severity_bucket')}' (expected one of {sorted(valid_severities)})"
+            )
+            continue
+
+        try:
+            base_spread_prob = float(record["base_spread_prob"])
+            wind_dir_deg = float(record["wind_dir_deg"])
+            wind_strength = float(record["wind_strength"])
+        except (TypeError, ValueError) as exc:
+            errors.append(f"record[{idx}]: numeric parse failed ({exc})")
+            continue
+
+        if not (
+            math.isfinite(base_spread_prob)
+            and math.isfinite(wind_dir_deg)
+            and math.isfinite(wind_strength)
+        ):
+            errors.append(f"record[{idx}]: numeric fields must be finite floats")
+            continue
+
+        if not 0.0 <= base_spread_prob <= 1.0:
+            errors.append(
+                f"record[{idx}]: base_spread_prob {base_spread_prob} out of range [0.0, 1.0]"
+            )
+            continue
+
+        if not 0.0 <= wind_dir_deg <= 360.0:
+            errors.append(f"record[{idx}]: wind_dir_deg {wind_dir_deg} out of range [0.0, 360.0]")
+            continue
+
+        if not 0.0 <= wind_strength <= 1.0:
+            errors.append(f"record[{idx}]: wind_strength {wind_strength} out of range [0.0, 1.0]")
+            continue
+
+        normalized = dict(record)
+        normalized["record_id"] = record_id
+        normalized["split"] = split
+        normalized["severity_bucket"] = severity
+        normalized["base_spread_prob"] = base_spread_prob
+        normalized["wind_dir_deg"] = wind_dir_deg
+        normalized["wind_strength"] = wind_strength
+        validated.append(normalized)
+
+    if errors and benchmark_mode:
+        sample = "\n  - " + "\n  - ".join(errors[:10])
+        if len(errors) > 10:
+            sample += f"\n  - ... and {len(errors) - 10} more"
+        msg = (
+            f"Invalid scenario parameter dataset at {records_path}: "
+            f"{len(errors)} invalid record(s) found.{sample}"
+        )
+        raise ValueError(msg)
+
+    if errors and not benchmark_mode:
+        logger.warning(
+            "Scenario dataset %s has %s invalid record(s); skipping them in dev mode.",
+            records_path,
+            len(errors),
+        )
+        for detail in errors[:10]:
+            logger.warning("  %s", detail)
+        if len(errors) > 10:
+            logger.warning("  ... and %s more", len(errors) - 10)
+
+    if benchmark_mode and not validated:
+        msg = (
+            f"Scenario dataset {records_path} has no usable records after validation. "
+            "Benchmark mode requires a non-empty validated dataset."
+        )
+        raise ValueError(msg)
+
+    return validated
 
 
 def scenario_from_parameter_record(
@@ -194,6 +314,7 @@ class WildfireEnv(gym.Env):
         randomize_scenario: bool = True,
         scenario_families: list[tuple[str, str, str]] | None = None,
         scenario_parameter_records: list[dict] | None = None,
+        benchmark_mode: bool = True,
         # Legacy compat -- ignored if scenario is provided
         base_spread_rate_m_per_min: float | None = None,
     ):
@@ -208,7 +329,36 @@ class WildfireEnv(gym.Env):
         self.randomize_scenario = randomize_scenario
         self.scenario_families = scenario_families
         self.scenario_parameter_records = scenario_parameter_records or []
+        self.benchmark_mode = benchmark_mode
         self._active_parameter_record: dict | None = None
+        self._active_record_id: str | None = None
+        self._record_order: list[int] = []
+        self._record_cursor: int = 0
+
+        if self.benchmark_mode:
+            if not self.scenario_parameter_records:
+                msg = (
+                    "benchmark_mode=True requires non-empty scenario_parameter_records. "
+                    "Load frozen scenario_parameter_records_*.json and pass them to WildfireEnv."
+                )
+                raise ValueError(msg)
+            if scenario is not None:
+                msg = (
+                    "benchmark_mode=True does not accept fixed ScenarioConfig input. "
+                    "Use scenario_parameter_records for record-driven resets."
+                )
+                raise ValueError(msg)
+            if not self.randomize_scenario:
+                msg = (
+                    "benchmark_mode=True requires randomize_scenario=True for record-driven resets."
+                )
+                raise ValueError(msg)
+            if base_spread_rate_m_per_min is not None:
+                msg = (
+                    "base_spread_rate_m_per_min is a legacy dev-mode path and cannot be used "
+                    "with benchmark_mode=True."
+                )
+                raise ValueError(msg)
 
         # Scenario (may be overridden each reset if randomize_scenario=True)
         if scenario is not None:
@@ -262,27 +412,33 @@ class WildfireEnv(gym.Env):
         self.grid = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.step_count = 0
         self.assets_lost = 0
+        self._active_parameter_record = None
+        self._active_record_id = self._scenario.record_id
 
         # Optionally sample a new scenario
         if self.randomize_scenario:
             families = self.scenario_families or TRAIN_FAMILIES
-            ign, sev, layout = families[int(self.np_random.integers(len(families)))]
+            ign, _sev, layout = families[int(self.np_random.integers(len(families)))]
             if self.scenario_parameter_records:
-                matching_records = [
-                    record
-                    for record in self.scenario_parameter_records
-                    if str(record.get("severity_bucket", "")).lower() == sev
-                ]
-                source_records = matching_records or self.scenario_parameter_records
-                record = source_records[int(self.np_random.integers(len(source_records)))]
+                record = self._sample_parameter_record(reshuffle=seed is not None)
                 self._active_parameter_record = record
+                self._active_record_id = (
+                    str(record.get("record_id")) if record.get("record_id") else None
+                )
                 self._scenario = scenario_from_parameter_record(
                     record,
                     ignition=ign,
                     asset_layout=layout,
                 )
             else:
+                if self.benchmark_mode:
+                    msg = (
+                        "benchmark_mode=True cannot reset without scenario_parameter_records. "
+                        "Disable benchmark_mode only for explicit dev/ablation runs."
+                    )
+                    raise RuntimeError(msg)
                 self._active_parameter_record = None
+                self._active_record_id = None
                 self._scenario = random_scenario(self.np_random, families)
 
         # Reset budgets and cooldowns
@@ -303,6 +459,7 @@ class WildfireEnv(gym.Env):
 
         return self._get_obs(), {
             "scenario": self._scenario,
+            "record_id": self._active_record_id,
             "parameter_record": self._active_parameter_record,
         }
 
@@ -356,6 +513,7 @@ class WildfireEnv(gym.Env):
             "heli_left": self.heli_left,
             "crew_left": self.crew_left,
             "scenario": self._scenario,
+            "record_id": self._active_record_id,
             "parameter_record": self._active_parameter_record,
         }
 
@@ -365,6 +523,21 @@ class WildfireEnv(gym.Env):
 
     def _in_bounds(self, r: int, c: int) -> bool:
         return 0 <= r < self.grid_size and 0 <= c < self.grid_size
+
+    def _sample_parameter_record(self, *, reshuffle: bool = False) -> dict:
+        if not self.scenario_parameter_records:
+            msg = "No scenario_parameter_records available for sampling"
+            raise RuntimeError(msg)
+
+        if reshuffle or not self._record_order or self._record_cursor >= len(self._record_order):
+            self._record_order = [
+                int(i) for i in self.np_random.permutation(len(self.scenario_parameter_records))
+            ]
+            self._record_cursor = 0
+
+        index = self._record_order[self._record_cursor]
+        self._record_cursor += 1
+        return self.scenario_parameter_records[index]
 
     def _get_obs(self) -> np.ndarray:
         # Normalize grid: 6 cell types -> [0, 1]

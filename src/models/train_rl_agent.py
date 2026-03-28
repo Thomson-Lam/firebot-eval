@@ -38,8 +38,8 @@ def _existing_path(path: str | None) -> str | None:
 def _evaluate_model(model, dataset_path: str, seed: int, episodes: int = 5) -> tuple[float, float]:
     from src.models.fire_env import WildfireEnv, load_scenario_parameter_records
 
-    records = load_scenario_parameter_records(dataset_path)
-    eval_env = WildfireEnv(scenario_parameter_records=records)
+    records = load_scenario_parameter_records(dataset_path, benchmark_mode=True)
+    eval_env = WildfireEnv(scenario_parameter_records=records, benchmark_mode=True)
     returns = []
     assets_lost_total = []
     for ep in range(episodes):
@@ -98,10 +98,16 @@ def train(
 
     env_kwargs: dict = {}
     if scenario_dataset_path:
-        records = load_scenario_parameter_records(scenario_dataset_path)
+        records = load_scenario_parameter_records(scenario_dataset_path, benchmark_mode=True)
         env_kwargs["scenario_parameter_records"] = records
+        env_kwargs["benchmark_mode"] = True
         print(f"  Scenario records: {len(records)} from {scenario_dataset_path}")
     else:
+        print(
+            "  No scenario dataset found; running explicit legacy dev mode "
+            "with --spread-rate fallback."
+        )
+        env_kwargs["benchmark_mode"] = False
         env_kwargs["base_spread_rate_m_per_min"] = spread_rate_m_per_min
     vec_env = make_vec_env(
         WildfireEnv,

@@ -139,8 +139,16 @@ def _evaluate_agent_on_split(
     episode_metrics = []
 
     for seed in seeds:
-        env = WildfireEnv(scenario_parameter_records=records, randomize_scenario=True)
-        baseline_env = WildfireEnv(scenario_parameter_records=records, randomize_scenario=True)
+        env = WildfireEnv(
+            scenario_parameter_records=records,
+            randomize_scenario=True,
+            benchmark_mode=True,
+        )
+        baseline_env = WildfireEnv(
+            scenario_parameter_records=records,
+            randomize_scenario=True,
+            benchmark_mode=True,
+        )
         iterator = tqdm(range(episodes_per_seed), desc=f"{agent_name} seed={seed}", unit="ep")
         for ep in iterator:
             eval_seed = seed * 10_000 + ep
@@ -186,7 +194,7 @@ def _evaluate_agent_on_split(
 def _load_split_records(path: Path | None) -> list[dict]:
     if path is None or not path.exists():
         return []
-    return load_scenario_parameter_records(path)
+    return load_scenario_parameter_records(path, benchmark_mode=True)
 
 
 def main() -> None:

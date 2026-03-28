@@ -56,9 +56,9 @@ def _greedy_fallback(
     directions = [
         ("N", -1, 0, "ground_crew", "Establish northern anchor line"),
         ("NE", -0.7, 0.7, "helicopter", "Pre-position tanker for NE flank"),
-        ("E",  0, 1, "ground_crew", "Cut containment line on eastern flank"),
-        ("S",  1, 0, "ground_crew", "Southern backfire opportunity"),
-        ("W",  0, -1, "helicopter", "Air attack on advancing western head"),
+        ("E", 0, 1, "ground_crew", "Cut containment line on eastern flank"),
+        ("S", 1, 0, "ground_crew", "Southern backfire opportunity"),
+        ("W", 0, -1, "helicopter", "Air attack on advancing western head"),
     ]
 
     metres_per_deg_lat = 111_320
@@ -69,15 +69,17 @@ def _greedy_fallback(
     for name, dlat_factor, dlon_factor, asset, rationale in directions:
         lat = fire_lat + (dlat_factor * offset_m / metres_per_deg_lat)
         lon = fire_lon + (dlon_factor * offset_m / metres_per_deg_lon)
-        waypoints.append({
-            "direction": name,
-            "latitude": round(lat, 5),
-            "longitude": round(lon, 5),
-            "asset_type": asset,
-            "rationale": rationale,
-            "score": round(0.9 - len(waypoints) * 0.1, 2),
-            "source": "greedy_heuristic",
-        })
+        waypoints.append(
+            {
+                "direction": name,
+                "latitude": round(lat, 5),
+                "longitude": round(lon, 5),
+                "asset_type": asset,
+                "rationale": rationale,
+                "score": round(0.9 - len(waypoints) * 0.1, 2),
+                "source": "greedy_heuristic",
+            }
+        )
 
     return waypoints
 
@@ -94,8 +96,8 @@ def get_tactical_recommendations(
     If the PPO model is trained and saved, uses it for inference.
     Falls back to the greedy heuristic if model isn't available.
     """
-    fire_lat  = float(fire_data.get("latitude",  49.9071)) if fire_data else 49.9071
-    fire_lon  = float(fire_data.get("longitude", -119.496)) if fire_data else -119.496
+    fire_lat = float(fire_data.get("latitude", 49.9071)) if fire_data else 49.9071
+    fire_lon = float(fire_data.get("longitude", -119.496)) if fire_data else -119.496
     spread_1h = float(spread_output.get("spread_1h_m", 1200)) if spread_output else 1200
     spread_3h = float(spread_output.get("spread_3h_m", 3600)) if spread_output else 3600
 
@@ -111,6 +113,7 @@ def get_tactical_recommendations(
         spread_rate_m_per_min = spread_1h / 60.0
         env = WildfireEnv(
             base_spread_rate_m_per_min=spread_rate_m_per_min,
+            benchmark_mode=False,
         )
         model = PPO.load(str(MODEL_PATH), env=env)
 
@@ -123,18 +126,18 @@ def get_tactical_recommendations(
             obs, reward, done, truncated, _info = env.step(int(action))
 
             if int(action) in deployment_actions:
-                lat, lon = _grid_to_latlon(
-                    env.agent_pos, fire_lat, fire_lon, spread_1h
-                )
+                lat, lon = _grid_to_latlon(env.agent_pos, fire_lat, fire_lon, spread_1h)
                 asset = "helicopter" if int(action) == 4 else "ground_crew"
-                waypoints.append({
-                    "latitude":   lat,
-                    "longitude":  lon,
-                    "asset_type": asset,
-                    "rationale":  f"PPO recommended {asset} deployment (step {env.step_count})",
-                    "score":      round(float(reward), 2),
-                    "source":     "ppo_agent",
-                })
+                waypoints.append(
+                    {
+                        "latitude": lat,
+                        "longitude": lon,
+                        "asset_type": asset,
+                        "rationale": f"PPO recommended {asset} deployment (step {env.step_count})",
+                        "score": round(float(reward), 2),
+                        "source": "ppo_agent",
+                    }
+                )
 
             if done or truncated:
                 break

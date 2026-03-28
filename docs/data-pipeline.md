@@ -1,6 +1,6 @@
 # Data Pipeline
 
-This document describes the current benchmark data pipeline after the move away from live CWFIS-centered ingestion and XGBoost.
+This document describes the current benchmark data pipeline for building frozen `FireEnv` datasets.
 
 The canonical path now uses the Alberta historical wildfire dataset stored under `data/static/` as the primary source for building `FireEnv` scenario records.
 
@@ -13,13 +13,12 @@ The benchmark pipeline has two stages:
 1. normalize historical wildfire incidents into frozen snapshot records
 2. compute offline environment-variable records for `FireEnv`
 
-Training and evaluation should then use only the cached parameter dataset plus seeded RNG.
+Downstream consumers should use the cached parameter dataset as the frozen benchmark input.
 
 Primary source hierarchy:
 
 - primary: Alberta historical wildfire dataset
-- supplementary: CFFDRS fire-danger indices when an annual station file is available and usable
-- non-canonical: CWFIS live active fires and FIRMS hotspots
+- supplementary: CFFDRS fire-danger indices when an annual station file is available and date-matchable
 
 ---
 
@@ -65,30 +64,11 @@ This module downloads annual CWFIS weather-station CSV data and parses:
 Current role:
 
 - supplementary enrichment only
-- if `--cffdrs-year` is passed and usable observations exist, the builder joins the nearest station by both distance and snapshot date
-- the benchmark no longer depends on CFFDRS being available to build records
+- if `--cffdrs-year` is passed and usable observations exist, the builder joins the nearest station by distance, with date alignment to each fire snapshot (`max_date_offset_days=1`)
+- the benchmark does not require CFFDRS availability to build records
+- practical implication: one run fetches a single annual station file, so date-matched enrichment is usually concentrated in that selected year
 
-### 2.3 `src/ingestion/cwfis.py`
-
-This module still downloads live active fires from CWFIS.
-
-Current role:
-
-- legacy / non-canonical
-- useful for live experiments or future non-Alberta extensions
-- not part of the canonical Alberta historical benchmark build
-
-### 2.4 `src/ingestion/firms.py`
-
-This module still fetches NASA FIRMS hotspots.
-
-Current role:
-
-- supplementary / non-canonical
-- not used in the canonical Alberta historical benchmark build
-- may still be useful for exploratory validation or future data discovery
-
-### 2.5 `src/ingestion/weather.py`
+### 2.3 `src/ingestion/weather.py`
 
 This module fetches current-hour weather from Open-Meteo.
 
@@ -109,10 +89,9 @@ Alberta historical wildfire CSV
 -> offline env-variable builder
 -> scenario_parameter_records.json
 -> FireEnv reset sampling
--> RL train/eval from cached records only
 ```
 
-This path does not use FIRMS or Open-Meteo in the canonical benchmark build.
+This path does not use FIRMS/CWFIS or Open-Meteo in the canonical benchmark build.
 
 The builder logs cleaning and drop diagnostics directly to stdout (with progress bars if `tqdm` is available) instead of writing a separate report artifact.
 
@@ -139,7 +118,17 @@ Row-level cleaning behavior:
   - `ASSESSMENT_HECTARES`
   - `CURRENT_SIZE`
 
-Normalization-time vetting in `src/ingestion/static_dataset.py` additionally drops rows that fail parsing or mapping, such as invalid datetimes, non-numeric required values, and unresolved wind direction values.
+Normalization-time vetting in `src/ingestion/static_dataset.py` additionally drops rows that fail parsing or mapping, such as invalid datetimes, non-numeric required values, unresolved wind direction values, or years outside the frozen split strategy.
+
+### 3.2 Candidate selection and truncation behavior
+
+After normalization, candidate fires are selected in this order:
+
+- deduplicate by `fire_id` (keep the first occurrence encountered for each fire id)
+- rank remaining candidates by descending `(observed_spread_rate_m_min, assessment_hectares/area_hectares, year, fire_id)`
+- apply `--target-count` as a per-split cap (`train`, `val`, `holdout`)
+
+This means `--target-count 100` exports up to `100` records per split, not `100` total.
 
 Current drop diagnostics printed to stdout include:
 
@@ -169,7 +158,7 @@ Generated split files:
 - `data/static/scenario_parameter_records_val.json`
 - `data/static/scenario_parameter_records_holdout.json`
 
-Each snapshot record represents one Alberta wildfire incident anchored at the initial assessment time.
+Each snapshot record represents one selected Alberta wildfire incident row after deduplication/ranking.
 
 Core stored fields:
 
@@ -183,12 +172,25 @@ Core stored fields:
 - response timing metadata: `detection_delay_h`, `report_delay_h`, `dispatch_delay_h`, `ia_travel_delay_h`
 - optional supplementary enrichment: `fwi`, `isi`, `bui`, `dc`, `dmc`, `ffmc`, station metadata
 
+Additional metadata currently written:
+
+- split and lifecycle metadata: `split`, `status`, `record_quality_flag`, `snapshot_generated_at`
+- CFFDRS alignment metadata: `cffdrs_station_distance_km`, `cffdrs_station_id`, `cffdrs_station_name`, `cffdrs_observation_date`, `cffdrs_date_offset_days`, `temporal_alignment_status`
+
 Important notes:
 
 - `snapshot_date` is anchored to `ASSESSMENT_DATETIME`
 - `area_hectares` prefers `ASSESSMENT_HECTARES`, with `CURRENT_SIZE` as fallback
 - `precipitation_mm` is estimated from `WEATHER_CONDITIONS_OVER_FIRE`
-- CFFDRS fields may be `null` if supplementary enrichment is unavailable
+- CFFDRS fields may be `null` if supplementary enrichment is unavailable or no station/date match is found
+- `temporal_alignment_status` is one of: `aligned`, `near_aligned`, `not_joined`
+
+Top-level JSON payload shape for output files:
+
+- `schema_version`
+- `generated_at`
+- `record_count`
+- `records`
 
 ---
 
@@ -278,6 +280,8 @@ Build with optional supplementary CFFDRS enrichment:
 uv run python -m src.ingestion.static_dataset --target-count 100 --cffdrs-year 2025
 ```
 
+`--cffdrs-year` downloads one annual CFFDRS station file for that year and attempts snapshot-date alignment (within one day) for each candidate fire.
+
 Canonical variant with CFFDRS enrichment:
 
 ```bash
@@ -296,16 +300,10 @@ Override the raw Alberta CSV path if needed:
 uv run python -m src.ingestion.static_dataset --raw-alberta-csv path/to/fp-historical-wildfire-data.csv --target-count 100
 ```
 
-Then train from the cached parameter file:
+Write outputs to a custom directory:
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
-```
-
-Recommended benchmark training/eval uses the split files directly:
-
-```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
+uv run python -m src.ingestion.static_dataset --output-dir path/to/output --target-count 100
 ```
 
 ---
@@ -314,7 +312,8 @@ uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenar
 
 - Alberta historical data is Alberta-only, so the canonical benchmark is currently province-scoped rather than Canada-wide.
 - CFFDRS annual station files may be sparse or unavailable for some years; the builder treats them as optional.
-- FIRMS and CWFIS remain available in the repo but are no longer part of the canonical benchmark build path.
+- In one run, CFFDRS enrichment is sourced from a single requested annual file; historical records from other years are unlikely to date-align.
+- Canonical ingestion does not use FIRMS or CWFIS live-fire modules.
 - The benchmark still does not use terrain rasters, perimeter replay, or a full operational spread model.
 
-That is acceptable for the current paper because the goal is a reproducible tactical RL benchmark, not an operational wildfire decision-support system.
+That is acceptable for the current paper because the goal is a reproducible tactical benchmark dataset, not an operational wildfire decision-support system.
