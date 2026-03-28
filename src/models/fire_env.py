@@ -62,6 +62,7 @@ SEVERITY_SPREAD_PROB = {
 }
 
 SEVERITY_INDEX = {"low": 0, "medium": 1, "high": 2}
+VALID_SPLITS = ("train", "val", "holdout")
 
 PARAMETER_METADATA_FIELDS = (
     "record_id",
@@ -160,7 +161,21 @@ def random_scenario(
     )
 
 
-def load_scenario_parameter_records(path: str | Path, *, benchmark_mode: bool = True) -> list[dict]:
+def _split_hint_from_path(path: Path) -> str | None:
+    stem = path.stem.lower()
+    for split in VALID_SPLITS:
+        token = f"_{split}"
+        if stem.endswith(token) or token in stem:
+            return split
+    return None
+
+
+def load_scenario_parameter_records(
+    path: str | Path,
+    *,
+    benchmark_mode: bool = True,
+    expected_split: str | None = None,
+) -> list[dict]:
     """Load and validate cached scenario parameter records from a JSON file."""
     records_path = Path(path)
     payload = json.loads(records_path.read_text())
@@ -169,10 +184,19 @@ def load_scenario_parameter_records(path: str | Path, *, benchmark_mode: bool = 
         msg = f"Invalid scenario parameter dataset: {records_path}"
         raise ValueError(msg)
 
-    valid_splits = {"train", "val", "holdout"}
+    valid_splits = set(VALID_SPLITS)
     valid_severities = set(SEVERITY_LEVELS)
     validated: list[dict] = []
     errors: list[str] = []
+
+    if expected_split is not None:
+        expected_split = expected_split.strip().lower()
+        if expected_split not in valid_splits:
+            msg = (
+                f"Invalid expected_split '{expected_split}' for dataset {records_path}; "
+                f"expected one of {sorted(valid_splits)}"
+            )
+            raise ValueError(msg)
 
     for idx, record in enumerate(records):
         if not isinstance(record, dict):
@@ -254,6 +278,62 @@ def load_scenario_parameter_records(path: str | Path, *, benchmark_mode: bool = 
         normalized["wind_strength"] = wind_strength
         validated.append(normalized)
 
+    path_split_hint = _split_hint_from_path(records_path)
+    if (
+        path_split_hint is not None
+        and expected_split is not None
+        and path_split_hint != expected_split
+    ):
+        msg = (
+            f"Split mismatch for {records_path}: expected_split='{expected_split}' "
+            f"but filename suggests '{path_split_hint}'"
+        )
+        if benchmark_mode:
+            raise ValueError(msg)
+        logger.warning(msg)
+
+    effective_expected_split = expected_split or path_split_hint
+    if benchmark_mode and effective_expected_split is None and validated:
+        record_splits = sorted({str(record["split"]) for record in validated})
+        if len(record_splits) == 1:
+            effective_expected_split = record_splits[0]
+        else:
+            msg = (
+                f"Could not infer a single split for {records_path}; found mixed splits {record_splits}. "
+                "Provide expected_split explicitly or use split-specific datasets."
+            )
+            raise ValueError(msg)
+
+    if effective_expected_split is not None and validated:
+        split_mismatch = [
+            f"record[{idx}]: split '{record['split']}' != expected '{effective_expected_split}'"
+            for idx, record in enumerate(validated)
+            if str(record["split"]) != effective_expected_split
+        ]
+        if split_mismatch and benchmark_mode:
+            sample = "\n  - " + "\n  - ".join(split_mismatch[:10])
+            if len(split_mismatch) > 10:
+                sample += f"\n  - ... and {len(split_mismatch) - 10} more"
+            msg = (
+                f"Split consistency check failed for {records_path}: "
+                f"{len(split_mismatch)} record(s) do not match expected split "
+                f"'{effective_expected_split}'.{sample}"
+            )
+            raise ValueError(msg)
+        if split_mismatch and not benchmark_mode:
+            logger.warning(
+                "Scenario dataset %s has %s split-mismatched record(s); skipping them in dev mode.",
+                records_path,
+                len(split_mismatch),
+            )
+            for detail in split_mismatch[:10]:
+                logger.warning("  %s", detail)
+            if len(split_mismatch) > 10:
+                logger.warning("  ... and %s more", len(split_mismatch) - 10)
+            validated = [
+                record for record in validated if str(record["split"]) == effective_expected_split
+            ]
+
     if errors and benchmark_mode:
         sample = "\n  - " + "\n  - ".join(errors[:10])
         if len(errors) > 10:
@@ -334,6 +414,7 @@ class WildfireEnv(gym.Env):
         randomize_scenario: bool = True,
         scenario_families: list[tuple[str, str, str]] | None = None,
         scenario_parameter_records: list[dict] | None = None,
+        expected_split: str | None = None,
         benchmark_mode: bool = True,
         # Legacy compat -- ignored if scenario is provided
         base_spread_rate_m_per_min: float | None = None,
@@ -349,6 +430,7 @@ class WildfireEnv(gym.Env):
         self.randomize_scenario = randomize_scenario
         self.scenario_families = scenario_families
         self.scenario_parameter_records = scenario_parameter_records or []
+        self.expected_split = expected_split.lower() if expected_split is not None else None
         self.benchmark_mode = benchmark_mode
         self._active_parameter_record: dict | None = None
         self._active_record_id: str | None = None
@@ -356,6 +438,12 @@ class WildfireEnv(gym.Env):
         self._record_cursor: int = 0
 
         if self.benchmark_mode:
+            if self.expected_split is not None and self.expected_split not in VALID_SPLITS:
+                msg = (
+                    f"Invalid expected_split '{self.expected_split}' for WildfireEnv; "
+                    f"expected one of {list(VALID_SPLITS)}"
+                )
+                raise ValueError(msg)
             if not self.scenario_parameter_records:
                 msg = (
                     "benchmark_mode=True requires non-empty scenario_parameter_records. "
@@ -379,6 +467,37 @@ class WildfireEnv(gym.Env):
                     "with benchmark_mode=True."
                 )
                 raise ValueError(msg)
+            record_splits = {
+                str(record.get("split", "")).strip().lower()
+                for record in self.scenario_parameter_records
+                if isinstance(record, dict)
+            }
+            if not record_splits:
+                msg = "benchmark_mode=True requires records with valid split fields"
+                raise ValueError(msg)
+            invalid_splits = [s for s in record_splits if s not in VALID_SPLITS]
+            if invalid_splits:
+                msg = (
+                    f"benchmark_mode=True found invalid split values {sorted(invalid_splits)}; "
+                    f"expected one of {list(VALID_SPLITS)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is not None and any(
+                s != self.expected_split for s in record_splits
+            ):
+                msg = (
+                    f"benchmark_mode=True expected split '{self.expected_split}' but got record splits "
+                    f"{sorted(record_splits)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is None and len(record_splits) != 1:
+                msg = (
+                    "benchmark_mode=True requires a single split dataset when expected_split is not "
+                    f"provided; got splits {sorted(record_splits)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is None:
+                self.expected_split = next(iter(record_splits))
 
         # Scenario (may be overridden each reset if randomize_scenario=True)
         if scenario is not None:

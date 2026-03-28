@@ -41,10 +41,10 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 
 ## 5) Tighten train/val/holdout setup semantics
 
-- [ ] Standardize env construction so training uses train records, validation uses val records, holdout uses holdout records.
-- [ ] Add internal guardrails to prevent accidental split mixing/leakage.
-- [ ] Decide whether to trust dataset filenames for split identity, record `split` values, or both.
-- [ ] Add lightweight split-consistency checks at environment creation time.
+- [x] Standardize env construction so training uses train records, validation uses val records, holdout uses holdout records.
+- [x] Add internal guardrails to prevent accidental split mixing/leakage.
+- [x] Decide whether to trust dataset filenames for split identity, record `split` values, or both (decision: both, with benchmark-mode hard checks).
+- [x] Add lightweight split-consistency checks at environment creation time.
 
 ## 6) Remove stale live-ingestion assumptions from env setup
 

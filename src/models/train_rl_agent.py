@@ -35,11 +35,25 @@ def _existing_path(path: str | None) -> str | None:
     return None
 
 
-def _evaluate_model(model, dataset_path: str, seed: int, episodes: int = 5) -> tuple[float, float]:
+def _evaluate_model(
+    model,
+    dataset_path: str,
+    seed: int,
+    episodes: int = 5,
+    expected_split: str | None = None,
+) -> tuple[float, float]:
     from src.models.fire_env import WildfireEnv, load_scenario_parameter_records
 
-    records = load_scenario_parameter_records(dataset_path, benchmark_mode=True)
-    eval_env = WildfireEnv(scenario_parameter_records=records, benchmark_mode=True)
+    records = load_scenario_parameter_records(
+        dataset_path,
+        benchmark_mode=True,
+        expected_split=expected_split,
+    )
+    eval_env = WildfireEnv(
+        scenario_parameter_records=records,
+        benchmark_mode=True,
+        expected_split=expected_split,
+    )
     returns = []
     assets_lost_total = []
     for ep in range(episodes):
@@ -98,9 +112,14 @@ def train(
 
     env_kwargs: dict = {}
     if scenario_dataset_path:
-        records = load_scenario_parameter_records(scenario_dataset_path, benchmark_mode=True)
+        records = load_scenario_parameter_records(
+            scenario_dataset_path,
+            benchmark_mode=True,
+            expected_split="train",
+        )
         env_kwargs["scenario_parameter_records"] = records
         env_kwargs["benchmark_mode"] = True
+        env_kwargs["expected_split"] = "train"
         print(f"  Scenario records: {len(records)} from {scenario_dataset_path}")
     else:
         print(
@@ -149,7 +168,13 @@ def train(
     for split_name, dataset_path in eval_targets:
         if not dataset_path:
             continue
-        mean_return, mean_assets_lost = _evaluate_model(model, dataset_path, seed=seed, episodes=5)
+        mean_return, mean_assets_lost = _evaluate_model(
+            model,
+            dataset_path,
+            seed=seed,
+            episodes=5,
+            expected_split=split_name,
+        )
         print(f"  [{split_name}] Mean return:      {mean_return:.1f}")
         print(f"  [{split_name}] Mean assets lost: {mean_assets_lost:.1f}")
     print(f"\nTraining complete. Model ready at {MODEL_SAVE_PATH}.zip")
