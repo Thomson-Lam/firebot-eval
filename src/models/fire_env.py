@@ -31,6 +31,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
+from hashlib import blake2b
 from pathlib import Path
 
 import gymnasium as gym
@@ -75,6 +76,8 @@ PARAMETER_METADATA_FIELDS = (
     "source",
     "province",
     "record_quality_flag",
+    "ignition_seed",
+    "layout_seed",
 )
 
 PARAMETER_AUDIT_FIELDS = (
@@ -171,6 +174,12 @@ def _split_hint_from_path(path: Path) -> str | None:
         if stem.endswith(token) or token in stem:
             return split
     return None
+
+
+def _stable_seed(*parts: object) -> int:
+    payload = "|".join(str(part) for part in parts).encode("utf-8")
+    digest = blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
 
 
 def load_scenario_parameter_records(
@@ -272,6 +281,24 @@ def load_scenario_parameter_records(
             errors.append(f"record[{idx}]: wind_strength {wind_strength} out of range [0.0, 1.0]")
             continue
 
+        seed_invalid = False
+        for seed_key in ("ignition_seed", "layout_seed"):
+            if record.get(seed_key) is None:
+                continue
+            try:
+                seed_value = int(record[seed_key])
+            except (TypeError, ValueError) as exc:
+                errors.append(f"record[{idx}]: {seed_key} parse failed ({exc})")
+                seed_invalid = True
+                continue
+            if seed_value < 0:
+                errors.append(f"record[{idx}]: {seed_key} must be >= 0")
+                seed_invalid = True
+                continue
+
+        if seed_invalid:
+            continue
+
         normalized = dict(record)
         normalized["record_id"] = record_id
         normalized["split"] = split
@@ -279,6 +306,10 @@ def load_scenario_parameter_records(
         normalized["base_spread_prob"] = base_spread_prob
         normalized["wind_dir_deg"] = wind_dir_deg
         normalized["wind_strength"] = wind_strength
+        if normalized.get("ignition_seed") is not None:
+            normalized["ignition_seed"] = int(normalized["ignition_seed"])
+        if normalized.get("layout_seed") is not None:
+            normalized["layout_seed"] = int(normalized["layout_seed"])
         validated.append(normalized)
 
     path_split_hint = _split_hint_from_path(records_path)
@@ -584,6 +615,10 @@ class WildfireEnv(gym.Env):
         self.crew_cd: int = 0
         self.assets_lost: int = 0
         self.initial_asset_count: int = 0
+        self._ignition_seed_used: int | None = None
+        self._layout_seed_used: int | None = None
+        self._ignition_rng: np.random.Generator | None = None
+        self._layout_rng: np.random.Generator | None = None
 
     @property
     def scenario(self) -> ScenarioConfig:
@@ -598,9 +633,16 @@ class WildfireEnv(gym.Env):
         self.assets_lost = 0
         self._active_parameter_record = None
         self._active_record_id = self._scenario.record_id
+        self._ignition_seed_used = None
+        self._layout_seed_used = None
+        self._ignition_rng = None
+        self._layout_rng = None
 
         # Optionally sample a new scenario
         if self.randomize_scenario:
+            # Ignition and asset layout remain simulator-side controls.
+            # Cached records provide spread/weather conditions; optional seeds
+            # can pin reproducible ignition/layout realizations.
             families = self.scenario_families or TRAIN_FAMILIES
             ign, _sev, layout = families[int(self.np_random.integers(len(families)))]
             if self.scenario_parameter_records:
@@ -615,6 +657,7 @@ class WildfireEnv(gym.Env):
                     ignition=ign,
                     asset_layout=layout,
                 )
+                self._configure_initialization_rngs(record=record, reset_seed=seed)
             else:
                 if self.benchmark_mode:
                     msg = (
@@ -625,6 +668,11 @@ class WildfireEnv(gym.Env):
                 self._active_parameter_record = None
                 self._active_record_id = None
                 self._scenario = random_scenario(self.np_random, families)
+
+        if self._ignition_rng is None:
+            self._ignition_rng = self.np_random
+        if self._layout_rng is None:
+            self._layout_rng = self.np_random
 
         # Reset budgets and cooldowns
         self.heli_left = self.heli_budget_init
@@ -648,6 +696,8 @@ class WildfireEnv(gym.Env):
             "split": self._active_parameter_record.get("split")
             if self._active_parameter_record
             else None,
+            "ignition_seed": self._ignition_seed_used,
+            "layout_seed": self._layout_seed_used,
             "parameter_record_meta": self._parameter_metadata(),
             "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
@@ -707,6 +757,8 @@ class WildfireEnv(gym.Env):
             "split": self._active_parameter_record.get("split")
             if self._active_parameter_record
             else None,
+            "ignition_seed": self._ignition_seed_used,
+            "layout_seed": self._layout_seed_used,
             "parameter_record_meta": self._parameter_metadata(),
             "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
@@ -718,6 +770,36 @@ class WildfireEnv(gym.Env):
 
     def _in_bounds(self, r: int, c: int) -> bool:
         return 0 <= r < self.grid_size and 0 <= c < self.grid_size
+
+    def _configure_initialization_rngs(
+        self,
+        *,
+        record: dict,
+        reset_seed: int | None,
+    ) -> None:
+        record_id = str(record.get("record_id") or "unknown")
+
+        ignition_seed = record.get("ignition_seed")
+        layout_seed = record.get("layout_seed")
+
+        if ignition_seed is None and reset_seed is not None:
+            ignition_seed = _stable_seed(record_id, reset_seed, "ignition")
+        if layout_seed is None and reset_seed is not None:
+            layout_seed = _stable_seed(record_id, reset_seed, "layout")
+
+        self._ignition_seed_used = int(ignition_seed) if ignition_seed is not None else None
+        self._layout_seed_used = int(layout_seed) if layout_seed is not None else None
+
+        self._ignition_rng = (
+            np.random.default_rng(self._ignition_seed_used)
+            if self._ignition_seed_used is not None
+            else self.np_random
+        )
+        self._layout_rng = (
+            np.random.default_rng(self._layout_seed_used)
+            if self._layout_seed_used is not None
+            else self.np_random
+        )
 
     def _parameter_metadata(self) -> dict:
         record = self._active_parameter_record
@@ -770,6 +852,7 @@ class WildfireEnv(gym.Env):
 
     def _ignite(self):
         """Set initial fire cells based on scenario ignition pattern."""
+        rng = self._ignition_rng or self.np_random
         gs = self.grid_size
         cx, cy = gs // 2, gs // 2
         pattern = self._scenario.ignition
@@ -778,7 +861,7 @@ class WildfireEnv(gym.Env):
             seeds = [(cx, cy), (cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)]
         elif pattern == "edge":
             # Fire starts along a random edge
-            edge = int(self.np_random.integers(4))
+            edge = int(rng.integers(4))
             if edge == 0:  # top
                 seeds = [(0, cy - 1), (0, cy), (0, cy + 1)]
             elif edge == 1:  # bottom
@@ -788,7 +871,7 @@ class WildfireEnv(gym.Env):
             else:  # right
                 seeds = [(cx - 1, gs - 1), (cx, gs - 1), (cx + 1, gs - 1)]
         elif pattern == "corner":
-            corner = int(self.np_random.integers(4))
+            corner = int(rng.integers(4))
             offsets = [(0, 0), (0, gs - 1), (gs - 1, 0), (gs - 1, gs - 1)]
             cr, cc = offsets[corner]
             seeds = [(cr, cc)]
@@ -799,11 +882,11 @@ class WildfireEnv(gym.Env):
                     seeds.append((nr, nc))
         elif pattern == "multi_cluster":
             # 2-3 small fire clusters scattered across the grid
-            n_clusters = int(self.np_random.integers(2, 4))
+            n_clusters = int(rng.integers(2, 4))
             seeds = []
             for _ in range(n_clusters):
-                r = int(self.np_random.integers(2, gs - 2))
-                c = int(self.np_random.integers(2, gs - 2))
+                r = int(rng.integers(2, gs - 2))
+                c = int(rng.integers(2, gs - 2))
                 seeds.append((r, c))
                 seeds.append((r + 1, c))
                 seeds.append((r, c + 1))
@@ -817,6 +900,7 @@ class WildfireEnv(gym.Env):
 
     def _place_assets(self):
         """Place critical asset cells based on scenario asset layout."""
+        rng = self._layout_rng or self.np_random
         gs = self.grid_size
         cx, cy = gs // 2, gs // 2
         min_dist = gs // 4
@@ -827,8 +911,8 @@ class WildfireEnv(gym.Env):
             placed = 0
             cluster_r, cluster_c = 0, 0
             for _ in range(100):
-                cluster_r = int(self.np_random.integers(0, gs))
-                cluster_c = int(self.np_random.integers(0, gs))
+                cluster_r = int(rng.integers(0, gs))
+                cluster_c = int(rng.integers(0, gs))
                 if abs(cluster_r - cx) + abs(cluster_c - cy) >= min_dist:
                     break
 
@@ -839,7 +923,7 @@ class WildfireEnv(gym.Env):
                     if dr == 0 and dc == 0:
                         continue
                     candidates.append((cluster_r + dr, cluster_c + dc))
-            self.np_random.shuffle(candidates)
+            rng.shuffle(candidates)
 
             for r, c in candidates:
                 if placed >= self.n_assets:
@@ -860,15 +944,15 @@ class WildfireEnv(gym.Env):
             for _ in range(2):
                 cluster_r, cluster_c = 0, 0
                 for _ in range(100):
-                    cluster_r = int(self.np_random.integers(0, gs))
-                    cluster_c = int(self.np_random.integers(0, gs))
+                    cluster_r = int(rng.integers(0, gs))
+                    cluster_c = int(rng.integers(0, gs))
                     if abs(cluster_r - cx) + abs(cluster_c - cy) >= min_dist:
                         break
 
                 candidates = [
                     (cluster_r + dr, cluster_c + dc) for dr in range(-1, 2) for dc in range(-1, 2)
                 ]
-                self.np_random.shuffle(candidates)
+                rng.shuffle(candidates)
 
                 cluster_placed = 0
                 for r, c in candidates:

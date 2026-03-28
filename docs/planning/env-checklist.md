@@ -66,13 +66,13 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 - [x] Keep dev/ablation paths clearly separated from benchmark/frozen paths.
 - [x] Add a single benchmark env factory/helper to centralize canonical env creation.
 
-## 9) Final items (defer until core alignment is complete)
+## 9) Final items (decision and implementation)
 
-- [ ] Decide whether ignition controls should move into cached dataset records.
-- [ ] Decide whether asset layout controls should move into cached dataset records.
-- [ ] If moved, define new dataset fields and update reset logic accordingly.
-- [ ] If not moved, explicitly document that ignition/layout remain simulator-side randomized controls.
-- [ ] Consider optional `ignition_seed` / `layout_seed` for exact episode replay once benchmark mode is stable.
+- [x] Decide whether ignition controls should move into cached dataset records (decision: no, keep simulator-side for now).
+- [x] Decide whether asset layout controls should move into cached dataset records (decision: no, keep simulator-side for now).
+- [x] If moved, define new dataset fields and update reset logic accordingly (not applied in this phase).
+- [x] If not moved, explicitly document that ignition/layout remain simulator-side randomized controls.
+- [x] Consider optional `ignition_seed` / `layout_seed` for exact episode replay once benchmark mode is stable (implemented as optional record fields; deterministic fallback derived from record_id + reset seed).
 
 ---
 
@@ -83,4 +83,4 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 3. Replace severity-only selection.
 4. Split guardrails and setup consistency.
 5. Tests for no-fallback + split isolation + record traceability.
-6. Defer ignition/layout dataset migration decisions to final items.
+6. Finalize ignition/layout strategy (kept simulator-side, optional replay seeds enabled).

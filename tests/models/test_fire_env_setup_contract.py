@@ -91,6 +91,7 @@ def test_active_scenario_uses_cached_parameter_values():
     )
     env = WildfireEnv(
         scenario_parameter_records=[record],
+        scenario_families=[("center", "medium", "A")],
         benchmark_mode=True,
         expected_split="train",
     )
@@ -140,6 +141,7 @@ def test_reset_and_step_info_include_record_and_split_metadata():
     )
     env = WildfireEnv(
         scenario_parameter_records=[record],
+        scenario_families=[("center", "medium", "A")],
         benchmark_mode=True,
         expected_split="train",
     )
@@ -149,10 +151,36 @@ def test_reset_and_step_info_include_record_and_split_metadata():
 
     assert reset_info["record_id"] == "AB-2020-info"
     assert reset_info["split"] == "train"
+    assert reset_info["ignition_seed"] is not None
+    assert reset_info["layout_seed"] is not None
     assert reset_info["parameter_record_meta"]["fire_id"] == "AB-2020-777"
     assert "spread_score" in reset_info["parameter_audit"]
 
     assert step_info["record_id"] == "AB-2020-info"
     assert step_info["split"] == "train"
+    assert step_info["ignition_seed"] == reset_info["ignition_seed"]
+    assert step_info["layout_seed"] == reset_info["layout_seed"]
     assert step_info["parameter_record_meta"]["record_quality_flag"] == "measured"
     assert "cffdrs_dryness_score" in step_info["parameter_audit"]
+
+
+def test_record_provided_initialization_seeds_make_spatial_setup_replayable():
+    record = _record(record_id="AB-2020-seeded", ignition_seed=12345, layout_seed=54321)
+    env = WildfireEnv(
+        scenario_parameter_records=[record],
+        scenario_families=[("center", "medium", "A")],
+        benchmark_mode=True,
+        expected_split="train",
+    )
+
+    env.reset(seed=1)
+    grid_a = env.grid.copy()
+    first_info_seed_pair = (env._ignition_seed_used, env._layout_seed_used)
+
+    env.reset(seed=999)
+    grid_b = env.grid.copy()
+    second_info_seed_pair = (env._ignition_seed_used, env._layout_seed_used)
+
+    assert first_info_seed_pair == (12345, 54321)
+    assert second_info_seed_pair == (12345, 54321)
+    assert (grid_a == grid_b).all()
