@@ -42,18 +42,10 @@ def _evaluate_model(
     episodes: int = 5,
     expected_split: str | None = None,
 ) -> tuple[float, float]:
-    from src.models.fire_env import WildfireEnv, load_scenario_parameter_records
+    from src.models.fire_env import create_benchmark_env
 
-    records = load_scenario_parameter_records(
-        dataset_path,
-        benchmark_mode=True,
-        expected_split=expected_split,
-    )
-    eval_env = WildfireEnv(
-        scenario_parameter_records=records,
-        benchmark_mode=True,
-        expected_split=expected_split,
-    )
+    split = expected_split or "train"
+    eval_env = create_benchmark_env(dataset_path=dataset_path, expected_split=split)
     returns = []
     assets_lost_total = []
     for ep in range(episodes):
@@ -93,7 +85,7 @@ def train(
         from stable_baselines3 import PPO
         from stable_baselines3.common.env_util import make_vec_env
 
-        from src.models.fire_env import WildfireEnv, load_scenario_parameter_records
+        from src.models.fire_env import WildfireEnv, benchmark_env_kwargs
     except ImportError as e:
         print(f"Missing dependency: {e}")
         print("   Run: uv sync")
@@ -112,14 +104,11 @@ def train(
 
     env_kwargs: dict = {}
     if scenario_dataset_path:
-        records = load_scenario_parameter_records(
-            scenario_dataset_path,
-            benchmark_mode=True,
+        env_kwargs = benchmark_env_kwargs(
+            dataset_path=scenario_dataset_path,
             expected_split="train",
         )
-        env_kwargs["scenario_parameter_records"] = records
-        env_kwargs["benchmark_mode"] = True
-        env_kwargs["expected_split"] = "train"
+        records = env_kwargs["scenario_parameter_records"]
         print("  Runtime data: frozen offline scenario records (no live ingestion)")
         print(f"  Scenario records: {len(records)} from {scenario_dataset_path}")
     else:

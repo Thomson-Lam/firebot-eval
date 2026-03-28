@@ -19,6 +19,7 @@ from src.models.fire_env import (
     MOVE_S,
     MOVE_W,
     WildfireEnv,
+    create_benchmark_env,
     load_scenario_parameter_records,
 )
 
@@ -140,16 +141,12 @@ def _evaluate_agent_on_split(
     episode_metrics = []
 
     for seed in seeds:
-        env = WildfireEnv(
+        env = create_benchmark_env(
             scenario_parameter_records=records,
-            randomize_scenario=True,
-            benchmark_mode=True,
             expected_split=split_name,
         )
-        baseline_env = WildfireEnv(
+        baseline_env = create_benchmark_env(
             scenario_parameter_records=records,
-            randomize_scenario=True,
-            benchmark_mode=True,
             expected_split=split_name,
         )
         iterator = tqdm(range(episodes_per_seed), desc=f"{agent_name} seed={seed}", unit="ep")

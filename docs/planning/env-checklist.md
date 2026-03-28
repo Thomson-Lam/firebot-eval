@@ -62,9 +62,9 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 
 ## 8) Cleanup and naming consistency
 
-- [ ] Remove or rename comments/identifiers that imply heuristic-first or live-data-first canonical behavior.
-- [ ] Keep dev/ablation paths clearly separated from benchmark/frozen paths.
-- [ ] Add a single benchmark env factory/helper to centralize canonical env creation.
+- [x] Remove or rename comments/identifiers that imply heuristic-first or live-data-first canonical behavior.
+- [x] Keep dev/ablation paths clearly separated from benchmark/frozen paths.
+- [x] Add a single benchmark env factory/helper to centralize canonical env creation.
 
 ## 9) Final items (defer until core alignment is complete)
 

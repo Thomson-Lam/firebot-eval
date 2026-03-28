@@ -57,8 +57,8 @@ DEPLOY_CREW = 5  # creates 1-cell firebreak
 
 GRID_SIZE = 25
 
-# Severity -> base spread probability (from impl-plan section 9.2)
-SEVERITY_SPREAD_PROB = {
+# Legacy fallback only (dev/ablation): severity -> base spread probability.
+LEGACY_SEVERITY_SPREAD_PROB = {
     "low": 0.04 + 0.18 * 0.17,  # spread_intensity ~ 0.17
     "medium": 0.04 + 0.18 * 0.50,  # spread_intensity ~ 0.50
     "high": 0.04 + 0.18 * 0.83,  # spread_intensity ~ 0.83
@@ -129,7 +129,7 @@ class ScenarioConfig:
     def spread_prob(self) -> float:
         if self.base_spread_prob is not None:
             return float(self.base_spread_prob)
-        return SEVERITY_SPREAD_PROB[self.severity]
+        return LEGACY_SEVERITY_SPREAD_PROB[self.severity]
 
     @property
     def wind_bias(self) -> tuple[float, float]:
@@ -151,7 +151,7 @@ def random_scenario(
     rng: np.random.Generator,
     families: list[tuple[str, str, str]] | None = None,
 ) -> ScenarioConfig:
-    """Sample a random scenario from the given families (default: train)."""
+    """Sample a random scenario for dev/ablation runs (default: train families)."""
     if families is None:
         families = TRAIN_FAMILIES
     ign, sev, layout = families[rng.integers(len(families))]
@@ -366,6 +366,48 @@ def load_scenario_parameter_records(
         raise ValueError(msg)
 
     return validated
+
+
+def benchmark_env_kwargs(
+    *,
+    expected_split: str,
+    scenario_parameter_records: list[dict] | None = None,
+    dataset_path: str | Path | None = None,
+) -> dict:
+    """Build canonical benchmark env kwargs from validated frozen records."""
+    if scenario_parameter_records is None:
+        if dataset_path is None:
+            msg = "Provide scenario_parameter_records or dataset_path for benchmark env creation"
+            raise ValueError(msg)
+        scenario_parameter_records = load_scenario_parameter_records(
+            dataset_path,
+            benchmark_mode=True,
+            expected_split=expected_split,
+        )
+
+    return {
+        "scenario_parameter_records": scenario_parameter_records,
+        "benchmark_mode": True,
+        "expected_split": expected_split,
+        "randomize_scenario": True,
+    }
+
+
+def create_benchmark_env(
+    *,
+    expected_split: str,
+    scenario_parameter_records: list[dict] | None = None,
+    dataset_path: str | Path | None = None,
+    **env_overrides,
+) -> WildfireEnv:
+    """Create a canonical benchmark env instance from frozen records."""
+    kwargs = benchmark_env_kwargs(
+        expected_split=expected_split,
+        scenario_parameter_records=scenario_parameter_records,
+        dataset_path=dataset_path,
+    )
+    kwargs.update(env_overrides)
+    return WildfireEnv(**kwargs)
 
 
 def scenario_from_parameter_record(
