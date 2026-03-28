@@ -13,7 +13,7 @@ The benchmark pipeline has two stages:
 1. normalize historical wildfire incidents into frozen snapshot records
 2. compute offline environment-variable records for `FireEnv`
 
-Downstream consumers should use the cached parameter dataset as the frozen benchmark input.
+Downstream benchmark consumers should use the seeded split parameter datasets (`scenario_parameter_records_seeded_{train|val|holdout}.json`) as frozen runtime inputs.
 
 Primary source hierarchy:
 
@@ -87,7 +87,8 @@ Alberta historical wildfire CSV
 -> optional CFFDRS date-and-distance enrichment
 -> snapshot_records.json
 -> offline env-variable builder
--> scenario_parameter_records.json
+-> scenario_parameter_records.json (unseeded build artifact)
+-> scenario_parameter_records_seeded_{split}.json (benchmark runtime artifact)
 -> FireEnv reset sampling
 ```
 
@@ -157,12 +158,14 @@ Generated split files:
 - `data/static/scenario_parameter_records_train.json`
 - `data/static/scenario_parameter_records_val.json`
 - `data/static/scenario_parameter_records_holdout.json`
+- `data/static/scenario_parameter_records_seeded.json`
 - `data/static/scenario_parameter_records_seeded_train.json`
 - `data/static/scenario_parameter_records_seeded_val.json`
 - `data/static/scenario_parameter_records_seeded_holdout.json`
 
 Seeded parameter files include deterministic `ignition_seed` and `layout_seed` for reproducible environment initialization.
 For the current benchmark setup, `scenario_parameter_records_seeded_holdout.json` is intentionally reduced to one unique held-out record.
+In benchmark mode, `FireEnv` expects these seed fields to be present on all loaded records.
 
 Each snapshot record represents one selected Alberta wildfire incident row after deduplication/ranking.
 
@@ -213,6 +216,12 @@ Canonical env-facing fields:
 - `ignition_seed`
 - `layout_seed`
 
+Canonical integration note:
+
+- ignition family and asset layout remain simulator-side controls
+- seeded parameter records do not store explicit ignition/layout labels
+- `ignition_seed` and `layout_seed` make those simulator-side initializations reproducible
+
 Stored audit fields:
 
 - `spread_rate_1h_m`
@@ -253,6 +262,12 @@ This is not a full Rothermel implementation. It is a benchmark-oriented, physics
 | `ignition_seed` | `record_id`, `split` | deterministic stable hash | seeds ignition initialization RNG |
 | `layout_seed` | `record_id`, `split` | deterministic stable hash | seeds asset-layout initialization RNG |
 | `spread_rate_1h_m` | `observed_spread_rate_m_min` | direct conversion to `m/hour` for audit/logging | optional logging only |
+
+Benchmark runtime file contract:
+
+- canonical train/eval inputs are split-specific seeded files (`scenario_parameter_records_seeded_{split}.json`)
+- benchmark loaders enforce split consistency from both filename hints and per-record `split` values
+- mixed-split datasets are rejected in benchmark mode
 
 Audit-only intermediates:
 
@@ -315,6 +330,12 @@ Write outputs to a custom directory:
 ```bash
 uv run python -m src.ingestion.static_dataset --output-dir path/to/output --target-count 100
 ```
+
+Canonical benchmark consumers should point training/evaluation envs at seeded split files, for example:
+
+- `data/static/scenario_parameter_records_seeded_train.json`
+- `data/static/scenario_parameter_records_seeded_val.json`
+- `data/static/scenario_parameter_records_seeded_holdout.json`
 
 ---
 

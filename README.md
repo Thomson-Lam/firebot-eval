@@ -96,6 +96,8 @@ We run this command run to ingest our dataset (with a large cap to avoid split t
 uv run python -m src.ingestion.static_dataset --target-count 50000 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
 ```
 
+This command builds data from the CSV and generates initialization seeds for ignition and asset layout for the corresponding environment. CFFDRS was not used to reduce confounding variables and any bias introduced due to incomplete CFFDRS data ingested for some specific fires.
+
 If CFFDRS for the selected year is sparse, the builder still runs and writes records without supplementary CFFDRS enrichment.
 
 Optionally, test with a smaller target count:
@@ -115,10 +117,10 @@ uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_record
 After building the dataset, you can train by running:
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json
 ```
 
-The scenario parameter file can then be consumed by `FireEnv` and PPO training.
+The seeded scenario parameter files are the canonical benchmark inputs for `FireEnv` and PPO training.
 
 The builder also writes year-based split files for the benchmark:
 
@@ -129,13 +131,13 @@ The builder also writes year-based split files for the benchmark:
 Training command:
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json
+uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json
 ```
 
 General split benchmark evaluation (PPO + baselines):
 
 ```bash
-uv run python -m src.models.evaluate_agents --agents ppo,greedy,random --train-dataset data/static/scenario_parameter_records_train.json --val-dataset data/static/scenario_parameter_records_val.json --holdout-dataset data/static/scenario_parameter_records_holdout.json --episodes 20 --seeds 42,43,44
+uv run python -m src.models.evaluate_agents --agents ppo,greedy,random --train-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json --episodes 20 --seeds 42,43,44
 ```
 
 The dataset builder prints cleaning/drop summaries to stdout and uses progress bars when `tqdm` is available.
