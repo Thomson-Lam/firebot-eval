@@ -54,11 +54,11 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 
 ## 7) Add targeted tests for the new setup contract
 
-- [ ] Add tests for scenario-record schema validation.
-- [ ] Add tests that benchmark mode fails fast instead of silently falling back.
-- [ ] Add tests that active scenario parameters in env match the selected cached record.
-- [ ] Add tests for split isolation between train/val/holdout datasets.
-- [ ] Add tests that reset/step info includes `record_id` and split metadata.
+- [x] Add tests for scenario-record schema validation.
+- [x] Add tests that benchmark mode fails fast instead of silently falling back.
+- [x] Add tests that active scenario parameters in env match the selected cached record.
+- [x] Add tests for split isolation between train/val/holdout datasets.
+- [x] Add tests that reset/step info includes `record_id` and split metadata.
 
 ## 8) Cleanup and naming consistency
 
