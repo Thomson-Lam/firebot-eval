@@ -34,10 +34,10 @@ It is aligned to the current static data pipeline outputs in `src/ingestion/stat
 
 ## 4) Align environment variable ingestion with pipeline contract
 
-- [ ] Confirm canonical runtime uses cached `base_spread_prob`, `wind_dir_deg`, `wind_strength`, and `severity_bucket` directly.
-- [ ] Keep builder audit fields (`spread_rate_1h_m`, `spread_score`, `weather_score`, `cffdrs_dryness_score`, `size_factor`, `fire_type_factor`, `fuel_factor`, `rain_factor`, `record_quality_flag`) as logging/debug fields unless explicitly promoted.
-- [ ] Surface selected metadata in episode info for debugging (at minimum `record_id`, `split`; optionally `fire_id`, `year`, `source`, `province`, `record_quality_flag`).
-- [ ] Ensure optional CFFDRS-derived fields do not trigger runtime network dependencies.
+- [x] Confirm canonical runtime uses cached `base_spread_prob`, `wind_dir_deg`, `wind_strength`, and `severity_bucket` directly.
+- [x] Keep builder audit fields (`spread_rate_1h_m`, `spread_score`, `weather_score`, `cffdrs_dryness_score`, `size_factor`, `fire_type_factor`, `fuel_factor`, `rain_factor`, `record_quality_flag`) as logging/debug fields unless explicitly promoted.
+- [x] Surface selected metadata in episode info for debugging (at minimum `record_id`, `split`; optionally `fire_id`, `year`, `source`, `province`, `record_quality_flag`).
+- [x] Ensure optional CFFDRS-derived fields do not trigger runtime network dependencies.
 
 ## 5) Tighten train/val/holdout setup semantics
 

@@ -63,6 +63,28 @@ SEVERITY_SPREAD_PROB = {
 
 SEVERITY_INDEX = {"low": 0, "medium": 1, "high": 2}
 
+PARAMETER_METADATA_FIELDS = (
+    "record_id",
+    "split",
+    "fire_id",
+    "year",
+    "source",
+    "province",
+    "record_quality_flag",
+)
+
+PARAMETER_AUDIT_FIELDS = (
+    "spread_rate_1h_m",
+    "spread_score",
+    "weather_score",
+    "cffdrs_dryness_score",
+    "size_factor",
+    "fire_type_factor",
+    "fuel_factor",
+    "rain_factor",
+    "record_quality_flag",
+)
+
 # ── Scenario families ────────────────────────────────────────────────────────
 
 IGNITION_TYPES = ("center", "edge", "corner", "multi_cluster")
@@ -270,17 +292,15 @@ def scenario_from_parameter_record(
     asset_layout: str,
 ) -> ScenarioConfig:
     """Build a ScenarioConfig from a cached parameter record."""
-    severity = str(record.get("severity_bucket", "medium")).lower()
+    severity = str(record["severity_bucket"]).lower()
     return ScenarioConfig(
         ignition=ignition,
-        severity=severity if severity in SEVERITY_LEVELS else "medium",
+        severity=severity,
         asset_layout=asset_layout,
-        wind_dir_deg=float(record.get("wind_dir_deg", 0.0) or 0.0),
-        wind_strength=float(record.get("wind_strength", 0.3) or 0.3),
-        base_spread_prob=float(record.get("base_spread_prob"))
-        if record.get("base_spread_prob") is not None
-        else None,
-        record_id=str(record.get("record_id")) if record.get("record_id") is not None else None,
+        wind_dir_deg=float(record["wind_dir_deg"]),
+        wind_strength=float(record["wind_strength"]),
+        base_spread_prob=float(record["base_spread_prob"]),
+        record_id=str(record["record_id"]),
     )
 
 
@@ -420,6 +440,7 @@ class WildfireEnv(gym.Env):
             families = self.scenario_families or TRAIN_FAMILIES
             ign, _sev, layout = families[int(self.np_random.integers(len(families)))]
             if self.scenario_parameter_records:
+                # Canonical path: consume precomputed offline parameters only.
                 record = self._sample_parameter_record(reshuffle=seed is not None)
                 self._active_parameter_record = record
                 self._active_record_id = (
@@ -460,6 +481,11 @@ class WildfireEnv(gym.Env):
         return self._get_obs(), {
             "scenario": self._scenario,
             "record_id": self._active_record_id,
+            "split": self._active_parameter_record.get("split")
+            if self._active_parameter_record
+            else None,
+            "parameter_record_meta": self._parameter_metadata(),
+            "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
         }
 
@@ -514,6 +540,11 @@ class WildfireEnv(gym.Env):
             "crew_left": self.crew_left,
             "scenario": self._scenario,
             "record_id": self._active_record_id,
+            "split": self._active_parameter_record.get("split")
+            if self._active_parameter_record
+            else None,
+            "parameter_record_meta": self._parameter_metadata(),
+            "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
         }
 
@@ -523,6 +554,18 @@ class WildfireEnv(gym.Env):
 
     def _in_bounds(self, r: int, c: int) -> bool:
         return 0 <= r < self.grid_size and 0 <= c < self.grid_size
+
+    def _parameter_metadata(self) -> dict:
+        record = self._active_parameter_record
+        if not record:
+            return {}
+        return {key: record.get(key) for key in PARAMETER_METADATA_FIELDS}
+
+    def _parameter_audit(self) -> dict:
+        record = self._active_parameter_record
+        if not record:
+            return {}
+        return {key: record.get(key) for key in PARAMETER_AUDIT_FIELDS if key in record}
 
     def _sample_parameter_record(self, *, reshuffle: bool = False) -> dict:
         if not self.scenario_parameter_records:
