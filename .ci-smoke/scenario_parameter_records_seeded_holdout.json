@@ -1,0 +1,1 @@
+{"schema_version": 3, "split": "holdout", "record_count": 1, "records": [{"record_id": "ci-holdout", "base_spread_prob": 0.14, "severity_bucket": "medium", "wind_direction": "E", "wind_strength": 0.35, "ignition_seed": 101, "layout_seed": 202, "split": "holdout"}]}

@@ -1,327 +1,235 @@
-# Frozen Environment Spec: Wildfire Simulator
+# Fire Environment Specification (Current Implementation)
 
-This document is the frozen canonical specification for the wildfire RL benchmark and its static scenario-parameter interface.
+This document describes the currently implemented RL environment in `src/models/fire_env.py` and its training/evaluation usage in `src/models/train_rl_agent.py` and `src/models/evaluate_agents.py`.
 
-It is aligned with `docs/planning/impl-plan.md` and is intended to remove ambiguity before coding, benchmarking, and reporting.
-
----
-
-## 1) What the Agent Represents
-
-The agent is a single tactical controller operating on a grid map.
-
-- It decides movement and suppression actions each step.
-- It has limited suppression resources (helicopter and crew budgets).
-- Its mission is not to minimize all fire everywhere; its mission is to protect critical assets under budget.
-
-Think of it as a simplified incident-response decision unit.
+It is intentionally code-first and only documents behavior that exists in the current codebase.
 
 ---
 
-## 2) Core Environment Definition
+## 1) Environment Definition
 
-## 2.1 Grid and Episode Constants (canonical)
+`WildfireEnv` is a single-agent, discrete-action tactical wildfire suppression environment.
 
-- Grid size: `25 x 25`
+- Agent count: `1`
+- Grid size: `25 x 25` (`625` cells)
 - Episode horizon: `150` steps
-- Per-episode budgets:
-  - `heli_left = 8`
-  - `crew_left = 20`
-- Cooldowns:
-  - helicopter cooldown: `5` steps
-  - crew cooldown: `2` steps
+- Action space: `6` discrete actions (`MOVE_N`, `MOVE_S`, `MOVE_E`, `MOVE_W`, `DEPLOY_HELICOPTER`, `DEPLOY_CREW`)
+- Fire process: one evolving fire field per episode (multiple burning cells can exist simultaneously)
 
-## 2.2 Cell encoding
+Cell encodings:
 
 - `0`: unburned
 - `1`: burning
 - `2`: burned
-- `3`: suppressed (firebreak or suppressed burn)
-- `4`: critical asset (unburned)
-- `5`: critical asset damaged/burning (internal bookkeeping can be separate, but report this event explicitly)
+- `3`: suppressed
+- `4`: critical asset
+- `5`: critical asset burned/lost
+
+Per-episode resource limits:
+
+- helicopter budget: `8`, cooldown: `5`
+- crew budget: `20`, cooldown: `2`
+
+About "how many states": this environment has a very large combinatorial state space (not a small enumerable finite-state MDP in practice). The policy input vector shape is fixed at `636`.
 
 ---
 
-## 3) Observation (State)
+## 2) How the Environment Gets and Uses Data from the Pipeline
 
-At each step, the policy receives:
+Canonical benchmark mode consumes seeded split scenario records produced by the data pipeline:
 
-1. Fire grid (`25x25`, encoded cells above)
-2. Agent position `(row, col)`
-3. Remaining resources: `heli_left`, `crew_left`
-4. Cooldowns: `heli_cd`, `crew_cd`
-5. Severity one-hot: `[low, medium, high]`
-6. Wind bias vector: `(wx, wy)`
+- `data/static/scenario_parameter_records_seeded_train.json`
+- `data/static/scenario_parameter_records_seeded_val.json`
+- `data/static/scenario_parameter_records_seeded_holdout.json`
 
-Canonical observation rule:
+Loader and integration flow:
 
-- The benchmark observation is the single encoded grid plus scalar features listed above.
-- Multi-channel observation variants are allowed only as ablations or future work and must not replace the canonical benchmark interface in the main comparison.
+1. `load_scenario_parameter_records(...)` validates each record.
+2. `create_benchmark_env(...)` creates `WildfireEnv` with strict benchmark settings.
+3. `reset()` samples one cached record and maps it to `ScenarioConfig`.
+4. The sampled record stays fixed for that episode.
 
-This state lets the policy reason about:
+Required benchmark fields:
 
-- where the fire is,
-- what must be protected,
-- what resources are still available,
-- how spread is likely to move spatially.
+- `record_id`, `split`
+- `base_spread_prob`, `severity_bucket`
+- `wind_direction` (8-direction string), `wind_strength`
+- `ignition_seed`, `layout_seed`
 
----
+How fields are used in env runtime:
 
-## 4) Action Semantics (Hard Rules)
+- `base_spread_prob`: baseline spread probability
+- `severity_bucket`: severity one-hot in observation
+- `wind_direction` + `wind_strength`: wind-bias vector for spread
+- `ignition_seed` / `layout_seed`: reproducible initialization RNGs for ignition and asset placement
 
-Action categories:
+Important boundary:
 
-- Mobility actions: `MOVE_N`, `MOVE_S`, `MOVE_E`, `MOVE_W`
-- Intervention actions: `DEPLOY_HELICOPTER`, `DEPLOY_CREW`
-
-Action IDs:
-
-- `0`: `MOVE_N`
-- `1`: `MOVE_S`
-- `2`: `MOVE_E`
-- `3`: `MOVE_W`
-- `4`: `DEPLOY_HELICOPTER`
-- `5`: `DEPLOY_CREW`
-
-Canonical action rule:
-
-- The canonical benchmark action set contains exactly these 6 actions.
-- `WAIT` is not part of the frozen benchmark and may be introduced only in ablations.
-
-Rules:
-
-- Movement changes position by one cell if in bounds; otherwise no movement.
-- Deployment actions act at the **current agent cell**.
-- Helicopter footprint: **3x3** neighborhood centered at agent.
-- Crew footprint: **1x1** current cell only.
-- Both can target burning or non-burning cells.
-- Burning cells in footprint become `suppressed`.
-- Unburned cells in footprint become `suppressed` firebreaks.
-
-Budget/cooldown gating:
-
-- Helicopter requires `heli_left > 0` and `heli_cd == 0`.
-- Crew requires `crew_left > 0` and `crew_cd == 0`.
-- Successful helicopter use: `heli_left -= 1`, `heli_cd = 5`.
-- Successful crew use: `crew_left -= 1`, `crew_cd = 2`.
-- Cooldowns decrement by 1 each step down to 0.
-
-Wasted action definition:
-
-An action is wasted if either:
-
-1. Deployment attempted while blocked by cooldown/budget, or
-2. Deployment causes zero state change in its footprint.
+- ignition family and asset layout labels remain simulator-side controls
+- seeded records do not store explicit ignition/layout labels
+- seeds make simulator-side initialization reproducible
 
 ---
 
-## 5) Fire Dynamics and Transition
+## 3) Implementation Details (Variable Updates and Core Functions)
 
-Each step after action execution:
+Record loading and benchmark setup:
 
-1. Apply suppression effects.
-2. Spread fire stochastically from burning cells to neighbors.
-3. Apply burn progression/burnout rules.
-4. Update asset-loss counters when fire reaches asset cells.
+- `load_scenario_parameter_records`: schema/range/split validation
+- `benchmark_env_kwargs`, `create_benchmark_env`: canonical benchmark env factory
+- `scenario_from_parameter_record`: maps one record into `ScenarioConfig`
 
-Spread probability is episode-parameterized:
+Episode construction and parameter sampling:
 
-- baseline from `base_spread_prob`
-- adjusted by wind bias `(wx, wy)` relative to neighbor direction
+- `reset`: samples scenario family + parameter record, resets budgets/cooldowns/state, places assets, ignites fire
+- `_sample_parameter_record`: seed-stable shuffled sampling over loaded records
+- `_configure_initialization_rngs`: configures ignition/layout RNGs from record seeds
 
-Canonical heterogeneity rule:
+State transition internals:
 
-- Wind bias is the only mandatory heterogeneity mechanism in canonical runs.
-- Additional local modifiers such as flammability maps are ablations or future work and must be reported separately.
-- Control-tick versus fire-tick cadence changes are also deferred to ablations or future work.
+- `_execute_action`: movement/suppression effects + immediate action reward terms
+- `_spread_fire`: wind-biased stochastic spread + asset-loss accounting + burnout
+- `_ignite`: ignition pattern initialization (`center`, `edge`, `corner`, `multi_cluster`)
+- `_place_assets`: layout initialization (`A`, `B`)
 
-Episode termination:
+Observation assembly:
 
-- success if no burning cells remain, or
-- horizon reached at step 150.
+- `_get_obs`: builds the flat `636`-length policy input vector
 
 ---
 
-## 6) Reward Function (Single-Objective)
+## 4) Observations (What the Agent Sees)
 
-Per-step reward:
+The policy receives a single flat vector with shape `636`:
 
-```text
-r_t =
-  - 75.0 * asset_cells_lost_t
-  - 0.4  * new_burned_cells_t
-  + 3.0  * burning_cells_suppressed_t
-  - 1.5  * heli_used_t
-  - 0.5  * crew_used_t
-  - 1.0  * wasted_action_t
-```
+1. flattened grid: `25 * 25 = 625`
+2. agent position (normalized row, col): `2`
+3. resources/cooldowns (normalized): `4`
+   - `heli_left`, `crew_left`, `heli_cd`, `crew_cd`
+4. severity one-hot: `3`
+5. wind bias vector: `2` (`wx`, `wy`)
+
+Total: `625 + 2 + 4 + 3 + 2 = 636`
+
+The environment returns `obs, reward, terminated, truncated, info` at each step.
+
+---
+
+## 5) Fire Dynamics and Transition 
+
+Per-step order:
+
+1. decrement cooldowns
+2. execute action
+3. apply resource-use penalties (`-1.5` heli, `-0.5` crew when used)
+4. advance spread via `_spread_fire`
+5. apply asset-loss and burn-growth penalties
+6. evaluate termination/truncation and terminal bonuses
+
+Spread rule:
+
+- base spread: `base_spread_prob`
+- wind adjustment: `base + 0.15 * wind_dot`
+- clipped spread probability: `[0.01, 0.95]`
+- neighborhood: 4-connected (`N/S/E/W`)
+- burning cells have `0.05` burnout chance each step
+
+Wind handling:
+
+- `wind_direction` is discrete 8-direction (`N`, `NE`, `E`, `SE`, `S`, `SW`, `W`, `NW`)
+- each direction maps to a unit/directional vector, scaled by `wind_strength`
+
+Termination:
+
+- `terminated=True` when no burning cells remain
+- `truncated=True` when step count reaches `150`
+
+---
+
+## 6) The Reward Function 
+
+Reward is assembled from multiple terms in `step()` and `_execute_action()`.
+
+Main terms:
+
+- `-75.0 * asset_cells_lost`
+- `-0.4 * new_burned` where `new_burned = max(0, burning_now - prev_burning)`
+- helicopter use cost: `-1.5`
+- crew use cost: `-0.5`
+- wasted/blocked deployment penalty: `-1.0`
+- suppression bonuses:
+  - helicopter: `+3.0` per suppressed affected cell in `3x3`
+  - crew on burning cell: `+3.0`
+  - crew firebreak on unburned cell: `+2.0`
 
 Terminal shaping:
 
-- `+100` if fire extinguished and no asset loss.
-- `+40` if episode ends with all assets intact.
+- `+100` if fire is extinguished and assets lost is `0`
+- `+40` if episode ends (terminated or truncated) with assets lost still `0`
 
-Interpretation:
+Optimization intent:
 
-- Asset protection is dominant objective.
-- Burn suppression and burn growth provide dense learning signal.
-- Resource costs prevent degenerate spam strategies.
-
----
-
-## 7) Static Scenario Parameter Interface
-
-The benchmark uses cached scenario records with environment variables computed offline before training and evaluation. These variables are not inferred live during benchmark runs.
-
-## 7.1 Snapshot inputs used during preprocessing
-
-Required canonical fields available to the preprocessing pipeline:
-
-- weather: `wind_speed_km_h`, `wind_direction_deg`, `temperature_c`, `relative_humidity_pct`, `precipitation_mm`
-- danger: `fwi`, `isi`, `bui`
-- incident: `area_hectares`, `latitude`, `longitude`, `province`
-
-Optional retained metadata:
-
-- `frp_mw`
-- `cffdrs_station_distance_km`
-- `dmc`, `dc`, `ffmc`
-
-## 7.2 Stored parameter record contract
-
-For each cached scenario record, store:
-
-1. `base_spread_prob`
-2. `severity_bucket`
-3. `wind_dir_deg`
-4. `wind_strength`
-5. optional logging fields such as `spread_rate_1h_m`
-
-Deterministic env mapping:
-
-- severity is encoded one-hot in the observation from `severity_bucket`
-- wind vector:
-  - `wx = wind_strength * cos(wind_dir_deg)`
-  - `wy = wind_strength * sin(wind_dir_deg)`
-- `base_spread_prob` is consumed directly by the environment spread rule
-
-Episode rule:
-
-- Sample one cached parameter record at reset.
-- Keep it fixed for the full episode in canonical runs.
+- primary objective is minimizing asset damage/loss
+- other terms provide dense tactical shaping for learning stability
 
 ---
 
-## 8) Mandatory Snapshot Pipeline for Reproducibility
+## 7) Training Process (Current Code)
 
-Training/evaluation must never depend on live API calls.
+Current training script:
 
-Required workflow:
+- `src/models/train_rl_agent.py`
+- algorithm currently implemented in this script: `PPO` (Stable-Baselines3)
 
-1. Collect and normalize ingestion data.
-2. Write versioned snapshot cache file(s).
-3. Compute environment variables offline from snapshot records.
-4. Produce cached env-parameter records.
-5. Train/evaluate RL only from cached records + seeded RNG.
+Canonical training flow:
 
-Fail-fast rule:
+1. load seeded train split dataset
+2. create vectorized benchmark envs (`n_envs`)
+3. train PPO for configured timesteps
+4. save model to `src/models/tactical_ppo_agent.zip`
+5. run quick evaluation on train and optional val/holdout datasets
 
-- If required fields are missing in benchmark mode, error out.
-- Do not silently inject hidden defaults during benchmark runs.
+Current benchmark evaluation script:
 
----
+- `src/models/evaluate_agents.py`
+- evaluates agents across splits (`train`, `val`, `holdout`)
+- supported evaluated agents: `ppo`, `greedy`, `random`
+- can output JSON summary via `--output`
 
-## 9) Training Process for the Agent
+Transparency outputs from current code:
 
-## 9.1 Algorithms
+- training console output: timesteps, env count, dataset path/count, quick split metrics
+- model artifact: `tactical_ppo_agent.zip`
+- evaluation console summary per split/agent
+- optional evaluation JSON with aggregate metrics
 
-- DQN
-- A2C
-- PPO
-- Baselines: greedy, random
+Recommended transparency plots (from saved eval JSON/logs):
 
-## 9.2 Fixed protocol
-
-- Train steps: `200,000` per algorithm per seed
-- Seeds: `11, 22, 33, 44, 55`
-- Eval cadence: every `20,000` steps
-- Eval episodes/checkpoint: `20`
-- Final eval episodes per seed: `100`
-
-## 9.3 Scenario families
-
-Asset layout definitions:
-
-- Layout `A`: one dense high-value asset cluster placed near moderate exposure to common ignition zones.
-- Layout `B`: two smaller separated asset clusters with different distances from common ignition zones.
-
-Train families:
-
-- ignition in `{center, edge, multi_cluster}`
-- severity in `{low, medium, high}`
-- asset layout `A`
-
-Held-out families:
-
-- ignition `corner` x all severities x layout `A`
-- ignition in `{center, edge, multi_cluster}` x severity `medium` x layout `B`
-
-## 9.4 Training loop (conceptual)
-
-```text
-for seed in [11,22,33,44,55]:
-  set global RNG seed
-  for algorithm in [DQN, A2C, PPO]:
-    init agent + env factory
-    for step in training_steps:
-      collect transitions
-      update policy/value per algorithm
-      if step % eval_interval == 0:
-        evaluate on fixed eval set (no fallback)
-        log metrics
-    run final 100-episode evaluation
-aggregate results across seeds
-compare against greedy and random baselines
-```
+- split-wise mean return (`train` vs `val` vs `holdout`)
+- split-wise asset survival and containment rates
+- final burned area distribution by split/agent
+- seed variability/error bars for key metrics
 
 ---
 
-## 10) What to Report
+## 8) Reporting Metrics 
 
-Primary metrics:
+Primary optimization target/what the agent is trained to do: **Minimize assets damaged/lost**
 
-1. mean episodic return
-2. asset survival rate
-3. containment success rate
-4. final burned area
-5. variance across seeds
+Additional reported metrics (already computed or directly derivable from current eval):
 
-Secondary metrics:
+- mean episodic return
+- standard deviation / variance across episodes
+- asset survival rate
+- containment success rate
+- mean final burned area
+- mean time to containment
+- mean resource efficiency
+- mean normalized burn ratio (optional in evaluator)
 
-- time to containment
-- resource efficiency
-- wasted deployment rate
-- held-out performance drop
-- normalized burn ratio
+Report these diagnostics during training:
 
-Normalized burn ratio definition:
+- train/val/holdout gap for each metric
+- per-seed summary tables
+- baseline comparisons (`greedy`, `random`) against PPO
 
-- `normalized_burn_ratio = final_burned_area_with_policy / final_burned_area_no_action_same_scenario`
-- For each evaluation scenario, run a no-action baseline with the same initial scenario record and RNG seed.
-- Report this as an evaluation-only metric; do not include it in the training reward.
-
-Interpretability checks:
-
-- which assets are protected first,
-- deployment timing under low vs high severity,
-- behavior under held-out corner ignition scenarios.
-
----
-
-## 11) Minimal Sanity Checklist Before Full Runs
-
-1. Reward sanity pass (20k PPO steps, 1 seed).
-2. Confirm non-zero asset-loss and suppression events in logs.
-3. Confirm budgets/cooldowns are enforced.
-4. Confirm no live API access during train/eval.
-5. Confirm held-out scenario IDs are excluded from training.

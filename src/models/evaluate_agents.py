@@ -19,6 +19,7 @@ from src.models.fire_env import (
     MOVE_S,
     MOVE_W,
     WildfireEnv,
+    create_benchmark_env,
     load_scenario_parameter_records,
 )
 
@@ -30,9 +31,9 @@ except Exception:  # pragma: no cover - optional dependency
         return iterable
 
 
-DEFAULT_TRAIN_DATASET = Path("data/static/scenario_parameter_records_train.json")
-DEFAULT_VAL_DATASET = Path("data/static/scenario_parameter_records_val.json")
-DEFAULT_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_holdout.json")
+DEFAULT_TRAIN_DATASET = Path("data/static/scenario_parameter_records_seeded_train.json")
+DEFAULT_VAL_DATASET = Path("data/static/scenario_parameter_records_seeded_val.json")
+DEFAULT_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_seeded_holdout.json")
 DEFAULT_PPO_MODEL = Path("src/models/tactical_ppo_agent.zip")
 
 
@@ -135,12 +136,19 @@ def _evaluate_agent_on_split(
     episodes_per_seed: int,
     model,
     compute_normalized_burn_ratio: bool,
+    split_name: str,
 ) -> dict:
     episode_metrics = []
 
     for seed in seeds:
-        env = WildfireEnv(scenario_parameter_records=records, randomize_scenario=True)
-        baseline_env = WildfireEnv(scenario_parameter_records=records, randomize_scenario=True)
+        env = create_benchmark_env(
+            scenario_parameter_records=records,
+            expected_split=split_name,
+        )
+        baseline_env = create_benchmark_env(
+            scenario_parameter_records=records,
+            expected_split=split_name,
+        )
         iterator = tqdm(range(episodes_per_seed), desc=f"{agent_name} seed={seed}", unit="ep")
         for ep in iterator:
             eval_seed = seed * 10_000 + ep
@@ -183,10 +191,14 @@ def _evaluate_agent_on_split(
     return summary
 
 
-def _load_split_records(path: Path | None) -> list[dict]:
+def _load_split_records(path: Path | None, *, split_name: str) -> list[dict]:
     if path is None or not path.exists():
         return []
-    return load_scenario_parameter_records(path)
+    return load_scenario_parameter_records(
+        path,
+        benchmark_mode=True,
+        expected_split=split_name,
+    )
 
 
 def main() -> None:
@@ -208,9 +220,9 @@ def main() -> None:
     agents = [a.strip().lower() for a in args.agents.split(",") if a.strip()]
 
     split_records = {
-        "train": _load_split_records(args.train_dataset),
-        "val": _load_split_records(args.val_dataset),
-        "holdout": _load_split_records(args.holdout_dataset),
+        "train": _load_split_records(args.train_dataset, split_name="train"),
+        "val": _load_split_records(args.val_dataset, split_name="val"),
+        "holdout": _load_split_records(args.holdout_dataset, split_name="holdout"),
     }
 
     results: dict[str, dict] = {}
@@ -231,6 +243,7 @@ def main() -> None:
                 episodes_per_seed=args.episodes,
                 model=model,
                 compute_normalized_burn_ratio=not args.no_normalized_burn,
+                split_name=split_name,
             )
             results[agent_name][split_name] = summary
 

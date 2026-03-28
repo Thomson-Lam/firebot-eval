@@ -12,9 +12,15 @@ A 25x25 cellular automata grid where:
 The agent must protect critical assets under a finite suppression budget.
 Scenarios vary by ignition pattern, severity, asset layout, and wind bias.
 
+Canonical benchmark mode consumes precomputed offline scenario parameter records.
+It does not fetch FIRMS/CWFIS/Open-Meteo/CFFDRS data at runtime.
+
 Usage:
     from src.models.fire_env import WildfireEnv, ScenarioConfig
-    env = WildfireEnv(scenario=ScenarioConfig(ignition="edge", severity="high"))
+    env = WildfireEnv(
+        scenario=ScenarioConfig(ignition="edge", severity="high"),
+        benchmark_mode=False,
+    )
     obs, info = env.reset()
     obs, reward, done, truncated, info = env.step(action)
 """
@@ -22,13 +28,17 @@ Usage:
 from __future__ import annotations
 
 import json
+import logging
 import math
 from dataclasses import dataclass
+from hashlib import blake2b
 from pathlib import Path
 
 import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
+
+logger = logging.getLogger(__name__)
 
 # Cell types
 UNBURNED = 0
@@ -48,14 +58,51 @@ DEPLOY_CREW = 5  # creates 1-cell firebreak
 
 GRID_SIZE = 25
 
-# Severity -> base spread probability (from impl-plan section 9.2)
-SEVERITY_SPREAD_PROB = {
+# Legacy fallback only (dev/ablation): severity -> base spread probability.
+LEGACY_SEVERITY_SPREAD_PROB = {
     "low": 0.04 + 0.18 * 0.17,  # spread_intensity ~ 0.17
     "medium": 0.04 + 0.18 * 0.50,  # spread_intensity ~ 0.50
     "high": 0.04 + 0.18 * 0.83,  # spread_intensity ~ 0.83
 }
 
 SEVERITY_INDEX = {"low": 0, "medium": 1, "high": 2}
+VALID_SPLITS = ("train", "val", "holdout")
+WIND_DIRECTIONS_8 = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
+_DIAG = 0.70710678118
+WIND_VECTOR_BY_DIR = {
+    "N": (0.0, -1.0),
+    "NE": (_DIAG, -_DIAG),
+    "E": (1.0, 0.0),
+    "SE": (_DIAG, _DIAG),
+    "S": (0.0, 1.0),
+    "SW": (-_DIAG, _DIAG),
+    "W": (-1.0, 0.0),
+    "NW": (-_DIAG, -_DIAG),
+}
+
+PARAMETER_METADATA_FIELDS = (
+    "record_id",
+    "split",
+    "fire_id",
+    "year",
+    "source",
+    "province",
+    "record_quality_flag",
+    "ignition_seed",
+    "layout_seed",
+)
+
+PARAMETER_AUDIT_FIELDS = (
+    "spread_rate_1h_m",
+    "spread_score",
+    "weather_score",
+    "cffdrs_dryness_score",
+    "size_factor",
+    "fire_type_factor",
+    "fuel_factor",
+    "rain_factor",
+    "record_quality_flag",
+)
 
 # ── Scenario families ────────────────────────────────────────────────────────
 
@@ -83,7 +130,7 @@ class ScenarioConfig:
     ignition: str = "center"
     severity: str = "medium"
     asset_layout: str = "A"
-    wind_dir_deg: float = 0.0  # 0 = wind blowing north->south
+    wind_direction: str = "N"
     wind_strength: float = 0.3  # [0, 1]
     base_spread_prob: float | None = None
     record_id: str | None = None
@@ -92,21 +139,21 @@ class ScenarioConfig:
         assert self.ignition in IGNITION_TYPES, f"Unknown ignition: {self.ignition}"
         assert self.severity in SEVERITY_LEVELS, f"Unknown severity: {self.severity}"
         assert self.asset_layout in ASSET_LAYOUTS, f"Unknown asset layout: {self.asset_layout}"
+        assert self.wind_direction in WIND_DIRECTIONS_8, (
+            f"Unknown wind direction: {self.wind_direction}"
+        )
 
     @property
     def spread_prob(self) -> float:
         if self.base_spread_prob is not None:
             return float(self.base_spread_prob)
-        return SEVERITY_SPREAD_PROB[self.severity]
+        return LEGACY_SEVERITY_SPREAD_PROB[self.severity]
 
     @property
     def wind_bias(self) -> tuple[float, float]:
         """Wind bias vector (wx, wy) for directional spread."""
-        rad = math.radians(self.wind_dir_deg)
-        return (
-            self.wind_strength * math.cos(rad),
-            self.wind_strength * math.sin(rad),
-        )
+        wx, wy = WIND_VECTOR_BY_DIR[self.wind_direction]
+        return (self.wind_strength * wx, self.wind_strength * wy)
 
     @property
     def severity_onehot(self) -> list[float]:
@@ -119,7 +166,7 @@ def random_scenario(
     rng: np.random.Generator,
     families: list[tuple[str, str, str]] | None = None,
 ) -> ScenarioConfig:
-    """Sample a random scenario from the given families (default: train)."""
+    """Sample a random scenario for dev/ablation runs (default: train families)."""
     if families is None:
         families = TRAIN_FAMILIES
     ign, sev, layout = families[rng.integers(len(families))]
@@ -127,20 +174,283 @@ def random_scenario(
         ignition=ign,
         severity=sev,
         asset_layout=layout,
-        wind_dir_deg=float(rng.uniform(0, 360)),
+        wind_direction=WIND_DIRECTIONS_8[int(rng.integers(len(WIND_DIRECTIONS_8)))],
         wind_strength=float(rng.uniform(0.1, 0.6)),
     )
 
 
-def load_scenario_parameter_records(path: str | Path) -> list[dict]:
-    """Load cached scenario parameter records from a JSON file."""
+def _split_hint_from_path(path: Path) -> str | None:
+    stem = path.stem.lower()
+    for split in VALID_SPLITS:
+        token = f"_{split}"
+        if stem.endswith(token) or token in stem:
+            return split
+    return None
+
+
+def _stable_seed(*parts: object) -> int:
+    payload = "|".join(str(part) for part in parts).encode("utf-8")
+    digest = blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
+
+
+def load_scenario_parameter_records(
+    path: str | Path,
+    *,
+    benchmark_mode: bool = True,
+    expected_split: str | None = None,
+) -> list[dict]:
+    """Load and validate precomputed scenario parameter records from a JSON file."""
     records_path = Path(path)
     payload = json.loads(records_path.read_text())
     records = payload.get("records", []) if isinstance(payload, dict) else payload
     if not isinstance(records, list):
         msg = f"Invalid scenario parameter dataset: {records_path}"
         raise ValueError(msg)
-    return [record for record in records if isinstance(record, dict)]
+
+    valid_splits = set(VALID_SPLITS)
+    valid_severities = set(SEVERITY_LEVELS)
+    validated: list[dict] = []
+    errors: list[str] = []
+
+    if expected_split is not None:
+        expected_split = expected_split.strip().lower()
+        if expected_split not in valid_splits:
+            msg = (
+                f"Invalid expected_split '{expected_split}' for dataset {records_path}; "
+                f"expected one of {sorted(valid_splits)}"
+            )
+            raise ValueError(msg)
+
+    for idx, record in enumerate(records):
+        if not isinstance(record, dict):
+            errors.append(f"record[{idx}]: expected object, got {type(record).__name__}")
+            continue
+
+        missing = [
+            field
+            for field in (
+                "record_id",
+                "split",
+                "base_spread_prob",
+                "severity_bucket",
+                "wind_direction",
+                "wind_strength",
+                *(("ignition_seed", "layout_seed") if benchmark_mode else ()),
+            )
+            if record.get(field) is None
+        ]
+        if missing:
+            errors.append(f"record[{idx}]: missing required fields {missing}")
+            continue
+
+        record_id = str(record.get("record_id", "")).strip()
+        if not record_id:
+            errors.append(f"record[{idx}]: record_id must be non-empty")
+            continue
+
+        split = str(record.get("split", "")).strip().lower()
+        if split not in valid_splits:
+            errors.append(
+                f"record[{idx}]: invalid split '{record.get('split')}' (expected one of {sorted(valid_splits)})"
+            )
+            continue
+
+        severity = str(record.get("severity_bucket", "")).strip().lower()
+        if severity not in valid_severities:
+            errors.append(
+                f"record[{idx}]: invalid severity_bucket "
+                f"'{record.get('severity_bucket')}' (expected one of {sorted(valid_severities)})"
+            )
+            continue
+
+        try:
+            base_spread_prob = float(record["base_spread_prob"])
+            wind_strength = float(record["wind_strength"])
+        except (TypeError, ValueError) as exc:
+            errors.append(f"record[{idx}]: numeric parse failed ({exc})")
+            continue
+
+        if not (math.isfinite(base_spread_prob) and math.isfinite(wind_strength)):
+            errors.append(f"record[{idx}]: numeric fields must be finite floats")
+            continue
+
+        if not 0.0 <= base_spread_prob <= 1.0:
+            errors.append(
+                f"record[{idx}]: base_spread_prob {base_spread_prob} out of range [0.0, 1.0]"
+            )
+            continue
+
+        wind_direction = str(record.get("wind_direction", "")).strip().upper()
+        if wind_direction not in WIND_DIRECTIONS_8:
+            errors.append(
+                f"record[{idx}]: invalid wind_direction '{record.get('wind_direction')}' "
+                f"(expected one of {list(WIND_DIRECTIONS_8)})"
+            )
+            continue
+
+        if not 0.0 <= wind_strength <= 1.0:
+            errors.append(f"record[{idx}]: wind_strength {wind_strength} out of range [0.0, 1.0]")
+            continue
+
+        seed_invalid = False
+        for seed_key in ("ignition_seed", "layout_seed"):
+            if record.get(seed_key) is None:
+                continue
+            try:
+                seed_value = int(record[seed_key])
+            except (TypeError, ValueError) as exc:
+                errors.append(f"record[{idx}]: {seed_key} parse failed ({exc})")
+                seed_invalid = True
+                continue
+            if seed_value < 0:
+                errors.append(f"record[{idx}]: {seed_key} must be >= 0")
+                seed_invalid = True
+                continue
+
+        if seed_invalid:
+            continue
+
+        normalized = dict(record)
+        normalized["record_id"] = record_id
+        normalized["split"] = split
+        normalized["severity_bucket"] = severity
+        normalized["base_spread_prob"] = base_spread_prob
+        normalized["wind_direction"] = wind_direction
+        normalized["wind_strength"] = wind_strength
+        if normalized.get("ignition_seed") is not None:
+            normalized["ignition_seed"] = int(normalized["ignition_seed"])
+        if normalized.get("layout_seed") is not None:
+            normalized["layout_seed"] = int(normalized["layout_seed"])
+        validated.append(normalized)
+
+    path_split_hint = _split_hint_from_path(records_path)
+    if (
+        path_split_hint is not None
+        and expected_split is not None
+        and path_split_hint != expected_split
+    ):
+        msg = (
+            f"Split mismatch for {records_path}: expected_split='{expected_split}' "
+            f"but filename suggests '{path_split_hint}'"
+        )
+        if benchmark_mode:
+            raise ValueError(msg)
+        logger.warning(msg)
+
+    effective_expected_split = expected_split or path_split_hint
+    if benchmark_mode and effective_expected_split is None and validated:
+        record_splits = sorted({str(record["split"]) for record in validated})
+        if len(record_splits) == 1:
+            effective_expected_split = record_splits[0]
+        else:
+            msg = (
+                f"Could not infer a single split for {records_path}; found mixed splits {record_splits}. "
+                "Provide expected_split explicitly or use split-specific datasets."
+            )
+            raise ValueError(msg)
+
+    if effective_expected_split is not None and validated:
+        split_mismatch = [
+            f"record[{idx}]: split '{record['split']}' != expected '{effective_expected_split}'"
+            for idx, record in enumerate(validated)
+            if str(record["split"]) != effective_expected_split
+        ]
+        if split_mismatch and benchmark_mode:
+            sample = "\n  - " + "\n  - ".join(split_mismatch[:10])
+            if len(split_mismatch) > 10:
+                sample += f"\n  - ... and {len(split_mismatch) - 10} more"
+            msg = (
+                f"Split consistency check failed for {records_path}: "
+                f"{len(split_mismatch)} record(s) do not match expected split "
+                f"'{effective_expected_split}'.{sample}"
+            )
+            raise ValueError(msg)
+        if split_mismatch and not benchmark_mode:
+            logger.warning(
+                "Scenario dataset %s has %s split-mismatched record(s); skipping them in dev mode.",
+                records_path,
+                len(split_mismatch),
+            )
+            for detail in split_mismatch[:10]:
+                logger.warning("  %s", detail)
+            if len(split_mismatch) > 10:
+                logger.warning("  ... and %s more", len(split_mismatch) - 10)
+            validated = [
+                record for record in validated if str(record["split"]) == effective_expected_split
+            ]
+
+    if errors and benchmark_mode:
+        sample = "\n  - " + "\n  - ".join(errors[:10])
+        if len(errors) > 10:
+            sample += f"\n  - ... and {len(errors) - 10} more"
+        msg = (
+            f"Invalid scenario parameter dataset at {records_path}: "
+            f"{len(errors)} invalid record(s) found.{sample}"
+        )
+        raise ValueError(msg)
+
+    if errors and not benchmark_mode:
+        logger.warning(
+            "Scenario dataset %s has %s invalid record(s); skipping them in dev mode.",
+            records_path,
+            len(errors),
+        )
+        for detail in errors[:10]:
+            logger.warning("  %s", detail)
+        if len(errors) > 10:
+            logger.warning("  ... and %s more", len(errors) - 10)
+
+    if benchmark_mode and not validated:
+        msg = (
+            f"Scenario dataset {records_path} has no usable records after validation. "
+            "Benchmark mode requires a non-empty validated dataset."
+        )
+        raise ValueError(msg)
+
+    return validated
+
+
+def benchmark_env_kwargs(
+    *,
+    expected_split: str,
+    scenario_parameter_records: list[dict] | None = None,
+    dataset_path: str | Path | None = None,
+) -> dict:
+    """Build canonical benchmark env kwargs from validated frozen records."""
+    if scenario_parameter_records is None:
+        if dataset_path is None:
+            msg = "Provide scenario_parameter_records or dataset_path for benchmark env creation"
+            raise ValueError(msg)
+        scenario_parameter_records = load_scenario_parameter_records(
+            dataset_path,
+            benchmark_mode=True,
+            expected_split=expected_split,
+        )
+
+    return {
+        "scenario_parameter_records": scenario_parameter_records,
+        "benchmark_mode": True,
+        "expected_split": expected_split,
+        "randomize_scenario": True,
+    }
+
+
+def create_benchmark_env(
+    *,
+    expected_split: str,
+    scenario_parameter_records: list[dict] | None = None,
+    dataset_path: str | Path | None = None,
+    **env_overrides,
+) -> WildfireEnv:
+    """Create a canonical benchmark env instance from frozen records."""
+    kwargs = benchmark_env_kwargs(
+        expected_split=expected_split,
+        scenario_parameter_records=scenario_parameter_records,
+        dataset_path=dataset_path,
+    )
+    kwargs.update(env_overrides)
+    return WildfireEnv(**kwargs)
 
 
 def scenario_from_parameter_record(
@@ -150,17 +460,15 @@ def scenario_from_parameter_record(
     asset_layout: str,
 ) -> ScenarioConfig:
     """Build a ScenarioConfig from a cached parameter record."""
-    severity = str(record.get("severity_bucket", "medium")).lower()
+    severity = str(record["severity_bucket"]).lower()
     return ScenarioConfig(
         ignition=ignition,
-        severity=severity if severity in SEVERITY_LEVELS else "medium",
+        severity=severity,
         asset_layout=asset_layout,
-        wind_dir_deg=float(record.get("wind_dir_deg", 0.0) or 0.0),
-        wind_strength=float(record.get("wind_strength", 0.3) or 0.3),
-        base_spread_prob=float(record.get("base_spread_prob"))
-        if record.get("base_spread_prob") is not None
-        else None,
-        record_id=str(record.get("record_id")) if record.get("record_id") is not None else None,
+        wind_direction=str(record["wind_direction"]),
+        wind_strength=float(record["wind_strength"]),
+        base_spread_prob=float(record["base_spread_prob"]),
+        record_id=str(record["record_id"]),
     )
 
 
@@ -194,6 +502,8 @@ class WildfireEnv(gym.Env):
         randomize_scenario: bool = True,
         scenario_families: list[tuple[str, str, str]] | None = None,
         scenario_parameter_records: list[dict] | None = None,
+        expected_split: str | None = None,
+        benchmark_mode: bool = True,
         # Legacy compat -- ignored if scenario is provided
         base_spread_rate_m_per_min: float | None = None,
     ):
@@ -208,7 +518,86 @@ class WildfireEnv(gym.Env):
         self.randomize_scenario = randomize_scenario
         self.scenario_families = scenario_families
         self.scenario_parameter_records = scenario_parameter_records or []
+        self.expected_split = expected_split.lower() if expected_split is not None else None
+        self.benchmark_mode = benchmark_mode
         self._active_parameter_record: dict | None = None
+        self._active_record_id: str | None = None
+        self._record_order: list[int] = []
+        self._record_cursor: int = 0
+
+        if self.benchmark_mode:
+            if self.expected_split is not None and self.expected_split not in VALID_SPLITS:
+                msg = (
+                    f"Invalid expected_split '{self.expected_split}' for WildfireEnv; "
+                    f"expected one of {list(VALID_SPLITS)}"
+                )
+                raise ValueError(msg)
+            if not self.scenario_parameter_records:
+                msg = (
+                    "benchmark_mode=True requires non-empty scenario_parameter_records. "
+                    "Load frozen scenario_parameter_records_*.json and pass them to WildfireEnv."
+                )
+                raise ValueError(msg)
+            if scenario is not None:
+                msg = (
+                    "benchmark_mode=True does not accept fixed ScenarioConfig input. "
+                    "Use scenario_parameter_records for record-driven resets."
+                )
+                raise ValueError(msg)
+            if not self.randomize_scenario:
+                msg = (
+                    "benchmark_mode=True requires randomize_scenario=True for record-driven resets."
+                )
+                raise ValueError(msg)
+            if base_spread_rate_m_per_min is not None:
+                msg = (
+                    "base_spread_rate_m_per_min is a legacy dev-mode path and cannot be used "
+                    "with benchmark_mode=True."
+                )
+                raise ValueError(msg)
+            record_splits = {
+                str(record.get("split", "")).strip().lower()
+                for record in self.scenario_parameter_records
+                if isinstance(record, dict)
+            }
+            if not record_splits:
+                msg = "benchmark_mode=True requires records with valid split fields"
+                raise ValueError(msg)
+            invalid_splits = [s for s in record_splits if s not in VALID_SPLITS]
+            if invalid_splits:
+                msg = (
+                    f"benchmark_mode=True found invalid split values {sorted(invalid_splits)}; "
+                    f"expected one of {list(VALID_SPLITS)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is not None and any(
+                s != self.expected_split for s in record_splits
+            ):
+                msg = (
+                    f"benchmark_mode=True expected split '{self.expected_split}' but got record splits "
+                    f"{sorted(record_splits)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is None and len(record_splits) != 1:
+                msg = (
+                    "benchmark_mode=True requires a single split dataset when expected_split is not "
+                    f"provided; got splits {sorted(record_splits)}"
+                )
+                raise ValueError(msg)
+            if self.expected_split is None:
+                self.expected_split = next(iter(record_splits))
+            missing_init = [
+                idx
+                for idx, record in enumerate(self.scenario_parameter_records)
+                if record.get("ignition_seed") is None or record.get("layout_seed") is None
+            ]
+            if missing_init:
+                msg = (
+                    "benchmark_mode=True requires initialization seeds on all records "
+                    f"(missing ignition_seed/layout_seed in {len(missing_init)} record(s)). "
+                    "Use scenario_parameter_records_seeded_*.json artifacts."
+                )
+                raise ValueError(msg)
 
         # Scenario (may be overridden each reset if randomize_scenario=True)
         if scenario is not None:
@@ -250,6 +639,10 @@ class WildfireEnv(gym.Env):
         self.crew_cd: int = 0
         self.assets_lost: int = 0
         self.initial_asset_count: int = 0
+        self._ignition_seed_used: int | None = None
+        self._layout_seed_used: int | None = None
+        self._ignition_rng: np.random.Generator | None = None
+        self._layout_rng: np.random.Generator | None = None
 
     @property
     def scenario(self) -> ScenarioConfig:
@@ -262,28 +655,48 @@ class WildfireEnv(gym.Env):
         self.grid = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.step_count = 0
         self.assets_lost = 0
+        self._active_parameter_record = None
+        self._active_record_id = self._scenario.record_id
+        self._ignition_seed_used = None
+        self._layout_seed_used = None
+        self._ignition_rng = None
+        self._layout_rng = None
 
         # Optionally sample a new scenario
         if self.randomize_scenario:
+            # Ignition and asset layout remain simulator-side controls.
+            # Cached records provide spread/weather conditions; optional seeds
+            # can pin reproducible ignition/layout realizations.
             families = self.scenario_families or TRAIN_FAMILIES
-            ign, sev, layout = families[int(self.np_random.integers(len(families)))]
+            ign, _sev, layout = families[int(self.np_random.integers(len(families)))]
             if self.scenario_parameter_records:
-                matching_records = [
-                    record
-                    for record in self.scenario_parameter_records
-                    if str(record.get("severity_bucket", "")).lower() == sev
-                ]
-                source_records = matching_records or self.scenario_parameter_records
-                record = source_records[int(self.np_random.integers(len(source_records)))]
+                # Canonical path: consume precomputed offline parameters only.
+                record = self._sample_parameter_record(reshuffle=seed is not None)
                 self._active_parameter_record = record
+                self._active_record_id = (
+                    str(record.get("record_id")) if record.get("record_id") else None
+                )
                 self._scenario = scenario_from_parameter_record(
                     record,
                     ignition=ign,
                     asset_layout=layout,
                 )
+                self._configure_initialization_rngs(record=record, reset_seed=seed)
             else:
+                if self.benchmark_mode:
+                    msg = (
+                        "benchmark_mode=True cannot reset without scenario_parameter_records. "
+                        "Disable benchmark_mode only for explicit dev/ablation runs."
+                    )
+                    raise RuntimeError(msg)
                 self._active_parameter_record = None
+                self._active_record_id = None
                 self._scenario = random_scenario(self.np_random, families)
+
+        if self._ignition_rng is None:
+            self._ignition_rng = self.np_random
+        if self._layout_rng is None:
+            self._layout_rng = self.np_random
 
         # Reset budgets and cooldowns
         self.heli_left = self.heli_budget_init
@@ -303,6 +716,14 @@ class WildfireEnv(gym.Env):
 
         return self._get_obs(), {
             "scenario": self._scenario,
+            "record_id": self._active_record_id,
+            "split": self._active_parameter_record.get("split")
+            if self._active_parameter_record
+            else None,
+            "ignition_seed": self._ignition_seed_used,
+            "layout_seed": self._layout_seed_used,
+            "parameter_record_meta": self._parameter_metadata(),
+            "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
         }
 
@@ -356,6 +777,14 @@ class WildfireEnv(gym.Env):
             "heli_left": self.heli_left,
             "crew_left": self.crew_left,
             "scenario": self._scenario,
+            "record_id": self._active_record_id,
+            "split": self._active_parameter_record.get("split")
+            if self._active_parameter_record
+            else None,
+            "ignition_seed": self._ignition_seed_used,
+            "layout_seed": self._layout_seed_used,
+            "parameter_record_meta": self._parameter_metadata(),
+            "parameter_audit": self._parameter_audit(),
             "parameter_record": self._active_parameter_record,
         }
 
@@ -365,6 +794,70 @@ class WildfireEnv(gym.Env):
 
     def _in_bounds(self, r: int, c: int) -> bool:
         return 0 <= r < self.grid_size and 0 <= c < self.grid_size
+
+    def _configure_initialization_rngs(
+        self,
+        *,
+        record: dict,
+        reset_seed: int | None,
+    ) -> None:
+        record_id = str(record.get("record_id") or "unknown")
+
+        ignition_seed = record.get("ignition_seed")
+        layout_seed = record.get("layout_seed")
+
+        if self.benchmark_mode and (ignition_seed is None or layout_seed is None):
+            msg = (
+                "benchmark_mode=True requires per-record ignition_seed and layout_seed "
+                "for reproducible initialization."
+            )
+            raise RuntimeError(msg)
+
+        if ignition_seed is None and reset_seed is not None:
+            ignition_seed = _stable_seed(record_id, reset_seed, "ignition")
+        if layout_seed is None and reset_seed is not None:
+            layout_seed = _stable_seed(record_id, reset_seed, "layout")
+
+        self._ignition_seed_used = int(ignition_seed) if ignition_seed is not None else None
+        self._layout_seed_used = int(layout_seed) if layout_seed is not None else None
+
+        self._ignition_rng = (
+            np.random.default_rng(self._ignition_seed_used)
+            if self._ignition_seed_used is not None
+            else self.np_random
+        )
+        self._layout_rng = (
+            np.random.default_rng(self._layout_seed_used)
+            if self._layout_seed_used is not None
+            else self.np_random
+        )
+
+    def _parameter_metadata(self) -> dict:
+        record = self._active_parameter_record
+        if not record:
+            return {}
+        return {key: record.get(key) for key in PARAMETER_METADATA_FIELDS}
+
+    def _parameter_audit(self) -> dict:
+        record = self._active_parameter_record
+        if not record:
+            return {}
+        return {key: record.get(key) for key in PARAMETER_AUDIT_FIELDS if key in record}
+
+    def _sample_parameter_record(self, *, reshuffle: bool = False) -> dict:
+        if not self.scenario_parameter_records:
+            msg = "No scenario_parameter_records available for sampling"
+            raise RuntimeError(msg)
+
+        if reshuffle or not self._record_order or self._record_cursor >= len(self._record_order):
+            self._record_order = [
+                int(i) for i in self.np_random.permutation(len(self.scenario_parameter_records))
+            ]
+            self._record_cursor = 0
+
+        index = self._record_order[self._record_cursor]
+        self._record_cursor += 1
+        return self.scenario_parameter_records[index]
 
     def _get_obs(self) -> np.ndarray:
         # Normalize grid: 6 cell types -> [0, 1]
@@ -390,6 +883,7 @@ class WildfireEnv(gym.Env):
 
     def _ignite(self):
         """Set initial fire cells based on scenario ignition pattern."""
+        rng = self._ignition_rng or self.np_random
         gs = self.grid_size
         cx, cy = gs // 2, gs // 2
         pattern = self._scenario.ignition
@@ -398,7 +892,7 @@ class WildfireEnv(gym.Env):
             seeds = [(cx, cy), (cx - 1, cy), (cx + 1, cy), (cx, cy - 1), (cx, cy + 1)]
         elif pattern == "edge":
             # Fire starts along a random edge
-            edge = int(self.np_random.integers(4))
+            edge = int(rng.integers(4))
             if edge == 0:  # top
                 seeds = [(0, cy - 1), (0, cy), (0, cy + 1)]
             elif edge == 1:  # bottom
@@ -408,7 +902,7 @@ class WildfireEnv(gym.Env):
             else:  # right
                 seeds = [(cx - 1, gs - 1), (cx, gs - 1), (cx + 1, gs - 1)]
         elif pattern == "corner":
-            corner = int(self.np_random.integers(4))
+            corner = int(rng.integers(4))
             offsets = [(0, 0), (0, gs - 1), (gs - 1, 0), (gs - 1, gs - 1)]
             cr, cc = offsets[corner]
             seeds = [(cr, cc)]
@@ -419,11 +913,11 @@ class WildfireEnv(gym.Env):
                     seeds.append((nr, nc))
         elif pattern == "multi_cluster":
             # 2-3 small fire clusters scattered across the grid
-            n_clusters = int(self.np_random.integers(2, 4))
+            n_clusters = int(rng.integers(2, 4))
             seeds = []
             for _ in range(n_clusters):
-                r = int(self.np_random.integers(2, gs - 2))
-                c = int(self.np_random.integers(2, gs - 2))
+                r = int(rng.integers(2, gs - 2))
+                c = int(rng.integers(2, gs - 2))
                 seeds.append((r, c))
                 seeds.append((r + 1, c))
                 seeds.append((r, c + 1))
@@ -437,6 +931,7 @@ class WildfireEnv(gym.Env):
 
     def _place_assets(self):
         """Place critical asset cells based on scenario asset layout."""
+        rng = self._layout_rng or self.np_random
         gs = self.grid_size
         cx, cy = gs // 2, gs // 2
         min_dist = gs // 4
@@ -447,8 +942,8 @@ class WildfireEnv(gym.Env):
             placed = 0
             cluster_r, cluster_c = 0, 0
             for _ in range(100):
-                cluster_r = int(self.np_random.integers(0, gs))
-                cluster_c = int(self.np_random.integers(0, gs))
+                cluster_r = int(rng.integers(0, gs))
+                cluster_c = int(rng.integers(0, gs))
                 if abs(cluster_r - cx) + abs(cluster_c - cy) >= min_dist:
                     break
 
@@ -459,7 +954,7 @@ class WildfireEnv(gym.Env):
                     if dr == 0 and dc == 0:
                         continue
                     candidates.append((cluster_r + dr, cluster_c + dc))
-            self.np_random.shuffle(candidates)
+            rng.shuffle(candidates)
 
             for r, c in candidates:
                 if placed >= self.n_assets:
@@ -480,15 +975,15 @@ class WildfireEnv(gym.Env):
             for _ in range(2):
                 cluster_r, cluster_c = 0, 0
                 for _ in range(100):
-                    cluster_r = int(self.np_random.integers(0, gs))
-                    cluster_c = int(self.np_random.integers(0, gs))
+                    cluster_r = int(rng.integers(0, gs))
+                    cluster_c = int(rng.integers(0, gs))
                     if abs(cluster_r - cx) + abs(cluster_c - cy) >= min_dist:
                         break
 
                 candidates = [
                     (cluster_r + dr, cluster_c + dc) for dr in range(-1, 2) for dc in range(-1, 2)
                 ]
-                self.np_random.shuffle(candidates)
+                rng.shuffle(candidates)
 
                 cluster_placed = 0
                 for r, c in candidates:

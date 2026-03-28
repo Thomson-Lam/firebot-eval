@@ -22,6 +22,7 @@ import logging
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import blake2b
 from pathlib import Path
 
 from src.ingestion.clean_historical import clean_raw_historical_row_with_reason
@@ -63,6 +64,8 @@ FIRE_TYPE_FACTOR = {
     "surface": 1.0,
     "crown": 1.18,
 }
+
+WIND_DIRECTIONS_8 = ("N", "NE", "E", "SE", "S", "SW", "W", "NW")
 
 
 @dataclass
@@ -128,6 +131,39 @@ def _parse_wind_direction(value: object) -> float | None:
         return float(text)
     except ValueError:
         return WIND_DIR_TO_DEG.get(text.upper())
+
+
+def _wind_direction_8_from_deg(value: float) -> str:
+    idx = int((value % 360.0) / 45.0 + 0.5) % 8
+    return WIND_DIRECTIONS_8[idx]
+
+
+def _stable_seed(*parts: object) -> int:
+    payload = "|".join(str(part) for part in parts).encode("utf-8")
+    digest = blake2b(payload, digest_size=8).digest()
+    return int.from_bytes(digest, byteorder="little", signed=False)
+
+
+def _with_initialization_seeds(record: dict) -> dict:
+    seeded = dict(record)
+    record_id = str(seeded.get("record_id") or "unknown")
+    split = str(seeded.get("split") or "unknown")
+    seeded["ignition_seed"] = _stable_seed(record_id, split, "ignition")
+    seeded["layout_seed"] = _stable_seed(record_id, split, "layout")
+    return seeded
+
+
+def _single_unique_record(records: list[dict]) -> list[dict]:
+    if not records:
+        return []
+    seen: set[str] = set()
+    for record in records:
+        record_id = str(record.get("record_id") or "")
+        if not record_id or record_id in seen:
+            continue
+        seen.add(record_id)
+        return [record]
+    return []
 
 
 def _estimate_precipitation_mm(condition: str | None) -> float:
@@ -225,7 +261,7 @@ def _normalize_alberta_row(row: dict) -> dict | None:
     spread_rate = _parse_float(cleaned.get("FIRE_SPREAD_RATE"))
     temp_c = _parse_float(cleaned.get("TEMPERATURE"))
     rh_pct = _parse_float(cleaned.get("RELATIVE_HUMIDITY"))
-    wind_dir_deg = _parse_wind_direction(cleaned.get("WIND_DIRECTION"))
+    wind_direction_deg = _parse_wind_direction(cleaned.get("WIND_DIRECTION"))
     wind_speed = _parse_float(cleaned.get("WIND_SPEED"))
 
     if not all([year, fire_number]) or lat is None or lon is None or assessment_dt is None:
@@ -234,7 +270,7 @@ def _normalize_alberta_row(row: dict) -> dict | None:
     area_hectares = assessment_hectares if assessment_hectares not in (None, 0.0) else current_size
     if area_hectares is None or spread_rate is None or temp_c is None or rh_pct is None:
         return None
-    if wind_dir_deg is None or wind_speed is None:
+    if wind_direction_deg is None or wind_speed is None:
         return None
 
     started_at = _parse_datetime(cleaned.get("FIRE_START_DATE"))
@@ -276,7 +312,7 @@ def _normalize_alberta_row(row: dict) -> dict | None:
         "observed_spread_rate_m_min": spread_rate,
         "temperature_c": temp_c,
         "relative_humidity_pct": rh_pct,
-        "wind_direction_deg": wind_dir_deg,
+        "wind_direction_deg": wind_direction_deg,
         "wind_speed_km_h": wind_speed,
         "precipitation_mm": _estimate_precipitation_mm(weather_over_fire),
         "fire_type": fire_type.lower(),
@@ -504,7 +540,8 @@ def compute_environment_parameters(snapshot: dict) -> dict:
     """Map one snapshot record into deterministic FireEnv parameter fields."""
     observed_spread = float(snapshot["observed_spread_rate_m_min"])
     wind_speed = float(snapshot["wind_speed_km_h"])
-    wind_dir_deg = float(snapshot["wind_direction_deg"])
+    wind_direction_deg = float(snapshot["wind_direction_deg"])
+    wind_direction = _wind_direction_8_from_deg(wind_direction_deg)
     temp_c = float(snapshot["temperature_c"])
     rh_pct = float(snapshot["relative_humidity_pct"])
     precip_mm = float(snapshot.get("precipitation_mm") or 0.0)
@@ -577,7 +614,7 @@ def compute_environment_parameters(snapshot: dict) -> dict:
         "split": snapshot.get("split"),
         "base_spread_prob": base_spread_prob,
         "severity_bucket": severity_bucket,
-        "wind_dir_deg": round(wind_dir_deg, 2),
+        "wind_direction": wind_direction,
         "wind_strength": wind_strength,
         "spread_rate_1h_m": spread_rate_1h_m,
         "spread_score": round(spread_score, 4),
@@ -649,21 +686,35 @@ def build_static_datasets(
         "records": snapshots,
     }
     params_payload = {
-        "schema_version": 2,
+        "schema_version": 3,
         "generated_at": datetime.now(UTC).isoformat(),
         "record_count": len(parameter_records),
         "records": parameter_records,
     }
+    seeded_parameter_records = [_with_initialization_seeds(record) for record in parameter_records]
+    seeded_params_payload = {
+        "schema_version": 3,
+        "generated_at": datetime.now(UTC).isoformat(),
+        "record_count": len(seeded_parameter_records),
+        "records": seeded_parameter_records,
+    }
 
     snapshot_path = output_dir / "snapshot_records.json"
     params_path = output_dir / "scenario_parameter_records.json"
+    seeded_params_path = output_dir / "scenario_parameter_records_seeded.json"
     snapshot_path.write_text(json.dumps(snapshot_payload, indent=2))
     params_path.write_text(json.dumps(params_payload, indent=2))
+    seeded_params_path.write_text(json.dumps(seeded_params_payload, indent=2))
 
     split_names = ("train", "val", "holdout")
     for split_name in split_names:
         split_snapshots = [record for record in snapshots if record.get("split") == split_name]
         split_params = [record for record in parameter_records if record.get("split") == split_name]
+        split_seeded_params = [
+            record for record in seeded_parameter_records if record.get("split") == split_name
+        ]
+        if split_name == "holdout":
+            split_seeded_params = _single_unique_record(split_seeded_params)
         (output_dir / f"snapshot_records_{split_name}.json").write_text(
             json.dumps(
                 {
@@ -679,7 +730,7 @@ def build_static_datasets(
         (output_dir / f"scenario_parameter_records_{split_name}.json").write_text(
             json.dumps(
                 {
-                    "schema_version": 2,
+                    "schema_version": 3,
                     "generated_at": datetime.now(UTC).isoformat(),
                     "split": split_name,
                     "record_count": len(split_params),
@@ -688,9 +739,26 @@ def build_static_datasets(
                 indent=2,
             )
         )
+        (output_dir / f"scenario_parameter_records_seeded_{split_name}.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 3,
+                    "generated_at": datetime.now(UTC).isoformat(),
+                    "split": split_name,
+                    "record_count": len(split_seeded_params),
+                    "records": split_seeded_params,
+                },
+                indent=2,
+            )
+        )
 
     logger.info("Wrote %s snapshot records to %s", len(snapshots), snapshot_path)
     logger.info("Wrote %s scenario parameter records to %s", len(parameter_records), params_path)
+    logger.info(
+        "Wrote %s seeded scenario parameter records to %s",
+        len(seeded_parameter_records),
+        seeded_params_path,
+    )
     for split_name in split_names:
         logger.info(
             "Split %s: %s records",

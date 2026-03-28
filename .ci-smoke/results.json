@@ -1,0 +1,78 @@
+{
+  "greedy": {
+    "train": {
+      "episodes": 1,
+      "mean_return": -139.8,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 557.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 19.892857142857142,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.911620294599018
+    },
+    "val": {
+      "episodes": 1,
+      "mean_return": -139.8,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 557.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 19.892857142857142,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.911620294599018
+    },
+    "holdout": {
+      "episodes": 1,
+      "mean_return": -139.8,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 557.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 19.892857142857142,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.911620294599018
+    }
+  },
+  "random": {
+    "train": {
+      "episodes": 1,
+      "mean_return": -297.3999999999999,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 595.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 21.25,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.9738134206219312
+    },
+    "val": {
+      "episodes": 1,
+      "mean_return": -257.60000000000014,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 581.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 20.75,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.9509001636661211
+    },
+    "holdout": {
+      "episodes": 1,
+      "mean_return": -266.00000000000006,
+      "std_return": 0.0,
+      "asset_survival_rate": 0.0,
+      "containment_success_rate": 0.0,
+      "mean_final_burned_area": 578.0,
+      "mean_time_to_containment": 150.0,
+      "mean_resource_efficiency": 20.642857142857142,
+      "variance_across_episodes": 0.0,
+      "mean_normalized_burn_ratio": 0.9459901800327333
+    }
+  }
+}

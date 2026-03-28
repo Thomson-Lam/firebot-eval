@@ -19,14 +19,45 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v4
       - run: uv sync
-      - name: Verify env imports and runs
+      - name: Build tiny seeded split datasets
         run: |
           uv run python -c "
-          from src.models.fire_env import WildfireEnv
-          env = WildfireEnv()
-          obs, _ = env.reset(seed=42)
-          assert obs.shape == (636,)
-          for _ in range(10):
-              obs, r, done, trunc, info = env.step(env.action_space.sample())
-          print('smoke test passed')
+          import json
+          from pathlib import Path
+
+          out = Path('.ci-smoke')
+          out.mkdir(exist_ok=True)
+
+          base = {
+              'record_id': 'ci-record',
+              'base_spread_prob': 0.14,
+              'severity_bucket': 'medium',
+              'wind_direction': 'E',
+              'wind_strength': 0.35,
+              'ignition_seed': 101,
+              'layout_seed': 202,
+          }
+
+          for split in ('train', 'val', 'holdout'):
+              payload = {
+                  'schema_version': 3,
+                  'split': split,
+                  'record_count': 1,
+                  'records': [{**base, 'record_id': f'ci-{split}', 'split': split}],
+              }
+              (out / f'scenario_parameter_records_seeded_{split}.json').write_text(
+                  json.dumps(payload)
+              )
+
+          print('tiny seeded datasets ready')
           "
+      - name: Tiny evaluator smoke test
+        run: |
+          uv run python -m src.models.evaluate_agents \
+            --agents greedy,random \
+            --episodes 1 \
+            --seeds 42 \
+            --train-dataset .ci-smoke/scenario_parameter_records_seeded_train.json \
+            --val-dataset .ci-smoke/scenario_parameter_records_seeded_val.json \
+            --holdout-dataset .ci-smoke/scenario_parameter_records_seeded_holdout.json \
+            --output .ci-smoke/results.json
