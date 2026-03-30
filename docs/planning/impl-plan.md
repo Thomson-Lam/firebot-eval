@@ -2,6 +2,8 @@
 
 This file is the single source of truth for implementation and evaluation.
 
+For the concrete training runner, tuning, checkpointing, and verification workflow, see `docs/planning/train-plan.md`.
+
 Project direction:
 
 **Empirical comparison of standard RL algorithms on an enhanced custom wildfire simulator with one objective: protect critical assets under limited suppression budget.**
@@ -194,6 +196,12 @@ If unstable, adjust only `asset` and `burn` coefficients once, then freeze.
 
 Report both in-distribution and held-out performance.
 
+Split interpretation note:
+
+- family holdout and temporal holdout are distinct and must be labeled separately in reporting.
+- canonical train/validation runs should pass explicit scenario families rather than relying on environment defaults.
+- the current temporal holdout artifact is a single-record diagnostic and should not be treated as a full held-out benchmark until expanded.
+
 ---
 
 ## 7) Algorithms to Benchmark
@@ -212,6 +220,8 @@ Recurrent baselines are not included because we will not add and test hidden reg
 
 ## 8) Benchmark Harness and Logging (Required Infrastructure)
 
+Exact metric definitions and the verification ladder are frozen in `docs/planning/train-plan.md`.
+
 Requirements:
 
 1. Unified runner for all algorithms.
@@ -219,14 +229,15 @@ Requirements:
 3. Metrics written to CSV/JSON per checkpoint and final summary.
 4. Distinct evaluation mode with fallback heuristics disabled for RL methods.
 5. Seed-aware aggregation scripts for mean/std and confidence intervals.
+6. Canonical checkpoint evaluation must exclude temporal holdout.
 
 Core metrics:
 
 1. mean episodic return
 2. asset survival rate
 3. containment success rate
-4. final burned area
-5. variance across seeds
+4. mean burned-area fraction
+5. standard deviation across seeds
 
 Secondary metrics:
 
@@ -241,6 +252,12 @@ Normalized burn ratio definition:
 - `final_burned_area_with_policy / final_burned_area_no_action_same_scenario`
 - The denominator comes from a no-action baseline rollout using the same scenario record and RNG seed.
 - This is an evaluation-only metric and does not modify the training reward.
+
+Metric interpretation notes:
+
+- `time to containment` is conditioned on successful containment episodes only.
+- `resource efficiency` is `successful_deployments / total_deployments`.
+- pooled episode variance is not the benchmark aggregate; summarize per seed first, then report `mean +- std` across seeds.
 
 ---
 
@@ -361,9 +378,11 @@ flowchart TD
 6. Implement scenario generator with frozen train/test families.
 7. Implement snapshot cache loader and offline parameter-to-env mapping.
 8. Add evaluation-only normalized burn ratio reporting.
-9. Run reward sanity pass and freeze coefficients.
-10. Run full multi-seed benchmarks for DQN/A2C/PPO + greedy/random.
-11. Aggregate plots/tables and write limitations.
+9. Add checkpoint metrics, config serialization, and best-checkpoint selection.
+10. Run reward sanity pass and freeze coefficients.
+11. Run algorithm smoke tests and short pilot tuning runs.
+12. Run full multi-seed benchmarks for DQN/A2C/PPO + greedy/random.
+13. Aggregate plots/tables and write limitations.
 
 ---
 
