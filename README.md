@@ -2,6 +2,68 @@
 
 Empirical RL benchmark for wildfire tactical suppression. Compares DQN, A2C, PPO, and heuristic baselines on a 25x25 grid environment with critical assets and finite suppression budgets.
 
+The physics informed environment and built environment records from the [Alberta Historical Wildfires Database](https://open.alberta.ca/opendata/wildfire-data).
+
+## Project Tree
+
+```text
+firebot/ 
+├── README.md 
+├── pyproject.toml 
+├── uv.lock 
+├── ruff.toml 
+├── lefthook.yml 
+├── fp-historical-wildfire-data-dictionary-2006-2025.pdf # from the dataset download
+├── data/ 
+│   └── static/ 
+│       ├── fp-historical-wildfire-data-2006-2025.csv # raw Alberta historical wildfire CSV 
+│       ├── snapshot_records.json # full normalized snapshot records from raw CSV
+│       ├── snapshot_records_train.json # train-year snapshot subset
+│       ├── snapshot_records_val.json # validation-year snapshot subset
+│       ├── snapshot_records_holdout.json # holdout-year snapshot subset
+│       ├── scenario_parameter_records.json # full unseeded environment parameter records
+│       ├── scenario_parameter_records_train.json # train split unseeded records
+│       ├── scenario_parameter_records_val.json # validation split unseeded records
+│       ├── scenario_parameter_records_holdout.json # holdout split unseeded records
+│       ├── scenario_parameter_records_seeded.json # full seeded records with ignition/layout seeds
+│       ├── scenario_parameter_records_seeded_train.json # train runtime records
+│       ├── scenario_parameter_records_seeded_val.json # validation runtime records
+│       └── scenario_parameter_records_seeded_holdout.json # temporal holdout runtime records
+├── docs/ 
+│   ├── data-pipeline.md 
+│   ├── envspec.md 
+│   └── planning/ 
+│       ├── env-checklist.md 
+│       ├── impl-plan.md 
+│       └── train-plan.md 
+├── src/ 
+│   ├── __init__.py 
+│   ├── ingestion/ 
+│   │   ├── __init__.py 
+│   │   ├── clean_historical.py # row cleaning and required-field checks
+│   │   ├── cffdrs.py # CFFDRS station ingestion, not used 
+│   │   ├── weather.py # legacy Open-Meteo weather fetch helpers, not used 
+│   │   └── static_dataset.py # builds snapshot/scenario parameter records in data/static
+│   └── models/ # environment, training, evaluation, and shared benchmark utilities
+│       ├── __init__.py 
+│       ├── fire_env.py # WildfireEnv implementation and benchmark env construction helpers
+│       ├── benchmarking.py # shared benchmark presets, rollout metrics, and aggregation functions
+│       ├── train_rl_agent.py # unified PPO/A2C/DQN trainer with checkpoint and final evaluation artifacts
+│       └── evaluate_agents.py # classdef for PPO/A2C/DQN plus greedy/random baselines
+├── scripts/ 
+│   ├── run_benchmark_train.sh # bash script for smoke validation then full 5-seed benchmark training
+│   ├── run_benchmark_train.ps1 # powershell equivalent 
+│   ├── run_benchmark_eval.sh # bash script for post-training benchmark evaluation by seed
+│   └── run_benchmark_eval.ps1 # powershell equivalent 
+├── tests/ 
+│   ├── conftest.py 
+│   └── models/ # environment and benchmark metric contract tests
+│       ├── test_fire_env_setup_contract.py # benchmark-mode env loading/split/schema contract tests
+│       └── test_benchmarking_metrics.py # benchmark metric/preset/aggregation tests
+├── outputs/ # generated training and evaluation artifacts (gitignored)
+└── drd-archive/ # archived prototype code from the earlier DRD proposal
+```
+
 ## Setup
 
 Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) 
@@ -114,30 +176,68 @@ uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_record
 
 ### Training 
 
-After building the dataset, you can train by running:
+For controlled and reproducible benchmark training, use the script wrappers in `scripts/`.
+
+Run from project root on macOS/Linux (bash):
 
 ```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json
+./scripts/run_benchmark_train.sh
 ```
 
-The seeded scenario parameter files are the canonical benchmark inputs for `FireEnv` and PPO training.
+Run from project root on Windows (PowerShell):
+
+```powershell
+./scripts/run_benchmark_train.ps1
+```
+
+Script runs:
+
+- Stage 1 (smoke): runs short validation training for `ppo`, `a2c`, `dqn` on one seed
+- Stage 2 (smoke eval): loads smoke `best_model.zip` artifacts and runs evaluator sanity checks
+- Stage 3 (formal): runs full canonical training for all three algorithms across 5 seeds (`11,22,33,44,55`)
+- Uses artifact root `outputs/benchmark/` and keeps default trainer settings for env count, timesteps, and checkpoint cadence on formal runs
+
+Training script environment overrides (optional):
+
+- `ARTIFACT_ROOT` (default `outputs/benchmark`)
+- `SMOKE_TIMESTEPS` (default `20000`, one canonical checkpoint interval)
+- `SMOKE_SEED` (default `11`)
+- `SMOKE_EVAL_EPISODES` (default `5`)
+- `FINAL_SEEDS_CSV` (default `11,22,33,44,55`)
+- `ALGO_ORDER_CSV` (default `ppo,a2c,dqn`)
+
+After `run_benchmark_train` completes, run benchmark evaluation wrappers.
+
+Run from project root on macOS/Linux (bash):
+
+```bash
+./scripts/run_benchmark_eval.sh
+```
+
+Run from project root on Windows (PowerShell):
+
+```powershell
+./scripts/run_benchmark_eval.ps1
+```
+
+These are the default values that can be overridden via env ars or editing the `ps1` and `.sh` scripts.
+
+- `ARTIFACT_ROOT` (default `outputs/benchmark`)
+- `RUN_LABEL` (default `final`)
+- `EVAL_SEEDS_CSV` (default `11,22,33,44,55`)
+- `EVAL_EPISODES` (default `100`)
+- `AGENTS` (default `ppo,a2c,dqn,greedy,random`)
+- `OUTPUT_DIR` (default `outputs/benchmark/<run_label>/eval`)
+- `INCLUDE_FAMILY_HOLDOUT` (`0` or `1`, default `0`)
+- `INCLUDE_TEMPORAL_HOLDOUT` (`0` or `1`, default `0`)
+- `NO_NORMALIZED_BURN` (`0` or `1`, default `0`)
+
+The seeded scenario parameter files are the benchmark inputs for `FireEnv` training and script-driven evaluation.
 
 The builder also writes year-based split files for the benchmark:
 
 - `train`: `2006-2022`
 - `val`: `2023`
 - `holdout`: `2024-2025`
-
-Training command:
-
-```bash
-uv run python -m src.models.train_rl_agent --scenario-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json
-```
-
-General split benchmark evaluation (PPO + baselines):
-
-```bash
-uv run python -m src.models.evaluate_agents --agents ppo,greedy,random --train-dataset data/static/scenario_parameter_records_seeded_train.json --val-dataset data/static/scenario_parameter_records_seeded_val.json --holdout-dataset data/static/scenario_parameter_records_seeded_holdout.json --episodes 20 --seeds 42,43,44
-```
 
 The dataset builder prints cleaning/drop summaries to stdout and uses progress bars when `tqdm` is available.

@@ -1,265 +1,217 @@
-"""General benchmark evaluation interface for RL agents on split datasets."""
+"""Unified benchmark evaluation runner for learned and heuristic agents."""
 
 from __future__ import annotations
 
 import argparse
 import json
 from pathlib import Path
+from typing import Any
 
-import numpy as np
-
-from src.models.fire_env import (
-    ASSET_BURNED,
-    BURNED,
-    BURNING,
-    DEPLOY_CREW,
-    DEPLOY_HELICOPTER,
-    MOVE_E,
-    MOVE_N,
-    MOVE_S,
-    MOVE_W,
-    WildfireEnv,
-    create_benchmark_env,
-    load_scenario_parameter_records,
+from src.models.benchmarking import (
+    RUN_LABELS,
+    build_default_splits,
+    canonical_eval_preset,
+    evaluate_agent_on_split,
+    heldout_performance_drop,
+    load_model_for_algo,
+    load_records,
 )
 
-try:
-    from tqdm import tqdm
-except Exception:  # pragma: no cover - optional dependency
-
-    def tqdm(iterable, **_kwargs):
-        return iterable
+SUPPORTED_AGENTS = ("ppo", "a2c", "dqn", "greedy", "random")
+LEARNED_AGENTS = {"ppo", "a2c", "dqn"}
 
 
-DEFAULT_TRAIN_DATASET = Path("data/static/scenario_parameter_records_seeded_train.json")
-DEFAULT_VAL_DATASET = Path("data/static/scenario_parameter_records_seeded_val.json")
-DEFAULT_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_seeded_holdout.json")
-DEFAULT_PPO_MODEL = Path("src/models/tactical_ppo_agent.zip")
+def _parse_csv_ints(raw: str) -> list[int]:
+    values = [int(part.strip()) for part in raw.split(",") if part.strip()]
+    if not values:
+        raise ValueError("At least one seed must be provided")
+    return values
 
 
-def _load_ppo_model(path: Path):
-    from stable_baselines3 import PPO
-
-    if not path.exists():
-        raise FileNotFoundError(f"PPO model not found at {path}")
-    return PPO.load(str(path))
-
-
-def _nearest_burning_cell(env: WildfireEnv) -> tuple[int, int] | None:
-    burning_positions = np.argwhere(env.grid == BURNING)
-    if burning_positions.size == 0:
-        return None
-    ar, ac = env.agent_pos
-    dists = np.abs(burning_positions[:, 0] - ar) + np.abs(burning_positions[:, 1] - ac)
-    idx = int(np.argmin(dists))
-    return int(burning_positions[idx, 0]), int(burning_positions[idx, 1])
+def _parse_agents(raw: str) -> list[str]:
+    agents = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    if not agents:
+        raise ValueError("At least one agent must be provided")
+    invalid = [agent for agent in agents if agent not in SUPPORTED_AGENTS]
+    if invalid:
+        msg = f"Unsupported agents {invalid}; expected any of {sorted(SUPPORTED_AGENTS)}"
+        raise ValueError(msg)
+    return agents
 
 
-def _greedy_action(env: WildfireEnv) -> int:
-    ar, ac = env.agent_pos
+def _resolve_model_paths(args, agents: list[str]) -> dict[str, Path]:
+    learned_agents = [agent for agent in agents if agent in LEARNED_AGENTS]
+    model_paths: dict[str, Path] = {}
 
-    if env.heli_left > 0 and env.heli_cd == 0:
-        for dr in range(-1, 2):
-            for dc in range(-1, 2):
-                rr, cc = ar + dr, ac + dc
-                if (
-                    0 <= rr < env.grid_size
-                    and 0 <= cc < env.grid_size
-                    and env.grid[rr, cc] == BURNING
-                ):
-                    return DEPLOY_HELICOPTER
+    for agent in learned_agents:
+        path = getattr(args, f"{agent}_model")
+        if path is not None:
+            model_paths[agent] = path
 
-    if env.crew_left > 0 and env.crew_cd == 0 and env.grid[ar, ac] == BURNING:
-        return DEPLOY_CREW
+    if args.model_path is not None and len(learned_agents) == 1:
+        model_paths[learned_agents[0]] = args.model_path
 
-    target = _nearest_burning_cell(env)
-    if target is None:
-        return MOVE_N
-
-    tr, tc = target
-    if tr < ar:
-        return MOVE_N
-    if tr > ar:
-        return MOVE_S
-    if tc > ac:
-        return MOVE_E
-    if tc < ac:
-        return MOVE_W
-    return DEPLOY_CREW if env.crew_left > 0 and env.crew_cd == 0 else MOVE_N
-
-
-def _run_episode(env: WildfireEnv, agent_name: str, model, seed: int) -> dict:
-    obs, _info = env.reset(seed=seed)
-    episode_return = 0.0
-    terminated = False
-    truncated = False
-    info = {}
-
-    for _ in range(env.max_steps):
-        if agent_name == "random":
-            action = int(env.action_space.sample())
-        elif agent_name == "greedy":
-            action = _greedy_action(env)
-        else:
-            action, _ = model.predict(obs, deterministic=True)
-            action = int(action)
-
-        obs, reward, terminated, truncated, info = env.step(action)
-        episode_return += float(reward)
-        if terminated or truncated:
-            break
-
-    final_burned_area = int(
-        np.sum((env.grid == BURNED) | (env.grid == BURNING) | (env.grid == ASSET_BURNED))
-    )
-    containment_success = 1 if terminated and not truncated else 0
-    heli_used = env.heli_budget_init - info.get("heli_left", env.heli_left)
-    crew_used = env.crew_budget_init - info.get("crew_left", env.crew_left)
-
-    return {
-        "return": episode_return,
-        "assets_lost": int(info.get("assets_lost", env.assets_lost)),
-        "containment_success": containment_success,
-        "final_burned_area": final_burned_area,
-        "time_to_containment": int(info.get("step", env.step_count)),
-        "heli_used": int(heli_used),
-        "crew_used": int(crew_used),
-        "resource_efficiency": float(final_burned_area / max(1, heli_used + crew_used)),
-    }
-
-
-def _evaluate_agent_on_split(
-    *,
-    agent_name: str,
-    records: list[dict],
-    seeds: list[int],
-    episodes_per_seed: int,
-    model,
-    compute_normalized_burn_ratio: bool,
-    split_name: str,
-) -> dict:
-    episode_metrics = []
-
-    for seed in seeds:
-        env = create_benchmark_env(
-            scenario_parameter_records=records,
-            expected_split=split_name,
+    missing = [agent for agent in learned_agents if agent not in model_paths]
+    if missing:
+        msg = (
+            "Missing model paths for learned agents "
+            f"{missing}. Provide --model-path (single learned agent only) or --ppo-model/--a2c-model/--dqn-model."
         )
-        baseline_env = create_benchmark_env(
-            scenario_parameter_records=records,
-            expected_split=split_name,
+        raise ValueError(msg)
+
+    return model_paths
+
+
+def _compute_performance_drops(agent_result: dict[str, Any]) -> dict[str, float]:
+    drops: dict[str, float] = {}
+    train_summary = agent_result.get("train", {}).get("aggregate", {})
+    train_asset_survival = train_summary.get("asset_survival_rate")
+    if train_asset_survival is None:
+        return drops
+
+    for split in ("val", "family_holdout", "temporal_holdout_diagnostic"):
+        split_summary = agent_result.get(split, {}).get("aggregate", {})
+        heldout_value = split_summary.get("asset_survival_rate")
+        if heldout_value is None:
+            continue
+        drops[f"{split}_asset_survival_drop"] = heldout_performance_drop(
+            float(train_asset_survival),
+            float(heldout_value),
         )
-        iterator = tqdm(range(episodes_per_seed), desc=f"{agent_name} seed={seed}", unit="ep")
-        for ep in iterator:
-            eval_seed = seed * 10_000 + ep
-            metrics = _run_episode(env, agent_name, model, seed=eval_seed)
-            if compute_normalized_burn_ratio:
-                # Use MOVE_N-only as deterministic no-action surrogate baseline.
-                _obs, _ = baseline_env.reset(seed=eval_seed)
-                for _ in range(baseline_env.max_steps):
-                    _obs, _reward, done, trunc, _base_info = baseline_env.step(MOVE_N)
-                    if done or trunc:
-                        break
-                baseline_burned = int(
-                    np.sum(
-                        (baseline_env.grid == BURNED)
-                        | (baseline_env.grid == BURNING)
-                        | (baseline_env.grid == ASSET_BURNED)
-                    )
-                )
-                metrics["normalized_burn_ratio"] = float(
-                    metrics["final_burned_area"] / max(1, baseline_burned)
-                )
-            episode_metrics.append(metrics)
-
-    arr = {
-        key: np.array([m[key] for m in episode_metrics], dtype=float) for key in episode_metrics[0]
-    }
-    summary = {
-        "episodes": len(episode_metrics),
-        "mean_return": float(arr["return"].mean()),
-        "std_return": float(arr["return"].std()),
-        "asset_survival_rate": float((arr["assets_lost"] == 0).mean()),
-        "containment_success_rate": float(arr["containment_success"].mean()),
-        "mean_final_burned_area": float(arr["final_burned_area"].mean()),
-        "mean_time_to_containment": float(arr["time_to_containment"].mean()),
-        "mean_resource_efficiency": float(arr["resource_efficiency"].mean()),
-        "variance_across_episodes": float(arr["return"].var()),
-    }
-    if "normalized_burn_ratio" in arr:
-        summary["mean_normalized_burn_ratio"] = float(arr["normalized_burn_ratio"].mean())
-    return summary
-
-
-def _load_split_records(path: Path | None, *, split_name: str) -> list[dict]:
-    if path is None or not path.exists():
-        return []
-    return load_scenario_parameter_records(
-        path,
-        benchmark_mode=True,
-        expected_split=split_name,
-    )
+    return drops
 
 
 def main() -> None:
+    preset = canonical_eval_preset()
+
     parser = argparse.ArgumentParser(
-        description="Evaluate benchmark agents on train/val/holdout splits"
+        description="Evaluate benchmark agents on canonical wildfire splits"
     )
-    parser.add_argument("--agents", type=str, default="ppo,greedy,random")
-    parser.add_argument("--train-dataset", type=Path, default=DEFAULT_TRAIN_DATASET)
-    parser.add_argument("--val-dataset", type=Path, default=DEFAULT_VAL_DATASET)
-    parser.add_argument("--holdout-dataset", type=Path, default=DEFAULT_HOLDOUT_DATASET)
-    parser.add_argument("--ppo-model", type=Path, default=DEFAULT_PPO_MODEL)
-    parser.add_argument("--episodes", type=int, default=20, help="Episodes per seed per split")
-    parser.add_argument("--seeds", type=str, default="42,43,44")
+    parser.add_argument(
+        "--benchmark-preset",
+        type=str,
+        default="canonical",
+        choices=("canonical",),
+        help="Benchmark-safe eval preset",
+    )
+    parser.add_argument("--agents", type=str, default="ppo,a2c,dqn,greedy,random")
+    parser.add_argument("--model-path", type=Path, default=None)
+    parser.add_argument("--ppo-model", type=Path, default=None)
+    parser.add_argument("--a2c-model", type=Path, default=None)
+    parser.add_argument("--dqn-model", type=Path, default=None)
+    parser.add_argument("--train-dataset", type=Path, default=preset["train_dataset"])
+    parser.add_argument("--val-dataset", type=Path, default=preset["val_dataset"])
+    parser.add_argument("--holdout-dataset", type=Path, default=preset["holdout_dataset"])
+    parser.add_argument(
+        "--episodes",
+        type=int,
+        default=preset["episodes"],
+        help="Episodes per seed per split",
+    )
+    parser.add_argument(
+        "--seeds",
+        type=str,
+        default=",".join(str(seed) for seed in preset["seeds"]),
+        help="Comma-separated seed list",
+    )
+    parser.add_argument(
+        "--include-family-holdout",
+        action="store_true",
+        help="Evaluate validation records with HELD_OUT_FAMILIES",
+    )
+    parser.add_argument(
+        "--include-temporal-holdout",
+        action="store_true",
+        help="Evaluate temporal holdout as diagnostic output",
+    )
     parser.add_argument("--no-normalized-burn", action="store_true")
+    parser.add_argument(
+        "--run-label",
+        type=str,
+        default="final",
+        choices=RUN_LABELS,
+        help="Run label attached to output metadata",
+    )
     parser.add_argument("--output", type=Path, default=None)
     args = parser.parse_args()
 
-    seeds = [int(s.strip()) for s in args.seeds.split(",") if s.strip()]
-    agents = [a.strip().lower() for a in args.agents.split(",") if a.strip()]
+    del args.benchmark_preset  # canonical is currently the only supported preset
+
+    seeds = _parse_csv_ints(args.seeds)
+    agents = _parse_agents(args.agents)
+    model_paths = _resolve_model_paths(args, agents)
+
+    split_configs = build_default_splits(
+        train_dataset=args.train_dataset,
+        val_dataset=args.val_dataset,
+        holdout_dataset=args.holdout_dataset,
+        include_family_holdout=args.include_family_holdout,
+        include_temporal_holdout=args.include_temporal_holdout,
+        train_families=preset["train_families"],
+        val_families=preset["val_families"],
+        family_holdout_families=preset["family_holdout_families"],
+        temporal_holdout_families=preset["temporal_holdout_families"],
+    )
 
     split_records = {
-        "train": _load_split_records(args.train_dataset, split_name="train"),
-        "val": _load_split_records(args.val_dataset, split_name="val"),
-        "holdout": _load_split_records(args.holdout_dataset, split_name="holdout"),
+        split.name: load_records(split.dataset_path, expected_split=split.expected_split)
+        for split in split_configs
     }
 
-    results: dict[str, dict] = {}
-    ppo_model = None
-    if "ppo" in agents:
-        ppo_model = _load_ppo_model(args.ppo_model)
+    results: dict[str, Any] = {
+        "config": {
+            "run_label": args.run_label,
+            "agents": agents,
+            "seeds": seeds,
+            "episodes_per_seed": args.episodes,
+            "compute_normalized_burn_ratio": not args.no_normalized_burn,
+            "splits": [split.name for split in split_configs],
+            "datasets": {
+                "train": str(args.train_dataset),
+                "val": str(args.val_dataset),
+                "holdout": str(args.holdout_dataset),
+            },
+            "model_paths": {name: str(path) for name, path in model_paths.items()},
+        },
+        "results": {},
+    }
 
-    for agent_name in agents:
-        results[agent_name] = {}
-        for split_name, records in split_records.items():
-            if not records:
-                continue
-            model = ppo_model if agent_name == "ppo" else None
-            summary = _evaluate_agent_on_split(
-                agent_name=agent_name,
-                records=records,
+    loaded_models = {agent: load_model_for_algo(agent, path) for agent, path in model_paths.items()}
+
+    for agent in agents:
+        agent_result: dict[str, Any] = {}
+        model = loaded_models.get(agent)
+        for split in split_configs:
+            split_eval = evaluate_agent_on_split(
+                agent_name=agent,
+                model=model,
+                records=split_records[split.name],
+                expected_split=split.expected_split,
+                scenario_families=split.scenario_families,
                 seeds=seeds,
                 episodes_per_seed=args.episodes,
-                model=model,
                 compute_normalized_burn_ratio=not args.no_normalized_burn,
-                split_name=split_name,
             )
-            results[agent_name][split_name] = summary
+            agent_result[split.name] = split_eval
+        agent_result["heldout_performance_drop"] = _compute_performance_drops(agent_result)
+        results["results"][agent] = agent_result
 
     print("\nBenchmark Summary")
-    print("=" * 72)
-    for agent_name, split_summaries in results.items():
-        for split_name, summary in split_summaries.items():
+    print("=" * 92)
+    for agent, split_payload in results["results"].items():
+        for split in split_configs:
+            aggregate = split_payload[split.name]["aggregate"]
+            stds = aggregate["std_across_seeds"]
             print(
-                f"{agent_name:>8} | {split_name:<7} | episodes={summary['episodes']:>4} "
-                f"| return={summary['mean_return']:.1f} "
-                f"| assets_survival={summary['asset_survival_rate']:.3f} "
-                f"| containment={summary['containment_success_rate']:.3f} "
-                f"| burned={summary['mean_final_burned_area']:.1f}"
+                f"{agent:>8} | {split.name:<26} "
+                f"| return={aggregate['mean_return']:.2f}±{stds['mean_return']:.2f} "
+                f"| asset_survival={aggregate['asset_survival_rate']:.3f}±{stds['asset_survival_rate']:.3f} "
+                f"| containment={aggregate['containment_success_rate']:.3f}±{stds['containment_success_rate']:.3f} "
+                f"| burned_frac={aggregate['mean_burned_area_fraction']:.3f}±{stds['mean_burned_area_fraction']:.3f}"
             )
 
     if args.output:
+        args.output.parent.mkdir(parents=True, exist_ok=True)
         args.output.write_text(json.dumps(results, indent=2))
         print(f"\nSaved results to {args.output}")
 

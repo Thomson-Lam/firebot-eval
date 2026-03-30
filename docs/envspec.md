@@ -1,8 +1,10 @@
-# Fire Environment Specification (Current Implementation)
+# Fire Environment Specification
 
-This document describes the currently implemented RL environment in `src/models/fire_env.py` and its training/evaluation usage in `src/models/train_rl_agent.py` and `src/models/evaluate_agents.py`.
+This document describes the RL environment in `src/models/fire_env.py` and its training/evaluation usage in `src/models/train_rl_agent.py` and `src/models/evaluate_agents.py`.
 
-It is intentionally code-first and only documents behavior that exists in the current codebase.
+It remains code-first for implemented behavior, but it also records the benchmark-alignment requirements that training and evaluation code must satisfy before full canonical runs are launched.
+
+The concrete benchmark execution plan lives in `docs/planning/train-plan.md`.
 
 ---
 
@@ -174,14 +176,14 @@ Optimization intent:
 
 ---
 
-## 7) Training Process (Current Code)
+## 7) Training Process
 
 Current training script:
 
 - `src/models/train_rl_agent.py`
-- algorithm currently implemented in this script: `PPO` (Stable-Baselines3)
+- currently implemented learned method: `PPO` (Stable-Baselines3)
 
-Canonical training flow:
+Current implemented flow:
 
 1. load seeded train split dataset
 2. create vectorized benchmark envs (`n_envs`)
@@ -189,12 +191,31 @@ Canonical training flow:
 4. save model to `src/models/tactical_ppo_agent.zip`
 5. run quick evaluation on train and optional val/holdout datasets
 
+Benchmark-aligned target flow:
+
+1. use a unified runner with `--algo {ppo,a2c,dqn}`
+2. keep the same benchmark-mode dataset path and split validation for all methods
+3. use vectorized envs for `PPO` and `A2C`
+4. use a single benchmark env for `DQN` by default
+5. write checkpoint metrics every fixed training interval
+6. save per-run config and per-checkpoint metrics to disk
+7. choose the best checkpoint by validation `asset_survival_rate`
+8. run final split-wise evaluation on train/val/holdout after training completes
+
 Current benchmark evaluation script:
 
 - `src/models/evaluate_agents.py`
 - evaluates agents across splits (`train`, `val`, `holdout`)
-- supported evaluated agents: `ppo`, `greedy`, `random`
+- currently implemented evaluated agents: `ppo`, `greedy`, `random`
 - can output JSON summary via `--output`
+
+Benchmark-aligned target support:
+
+- `ppo`
+- `a2c`
+- `dqn`
+- `greedy`
+- `random`
 
 Transparency outputs from current code:
 
@@ -202,6 +223,13 @@ Transparency outputs from current code:
 - model artifact: `tactical_ppo_agent.zip`
 - evaluation console summary per split/agent
 - optional evaluation JSON with aggregate metrics
+
+Required benchmark transparency outputs:
+
+- serialized run config per seed
+- checkpoint metrics on train/val/holdout
+- best-checkpoint selection record
+- final evaluation JSON aggregated by seed, then across seeds
 
 Recommended transparency plots (from saved eval JSON/logs):
 
@@ -212,24 +240,66 @@ Recommended transparency plots (from saved eval JSON/logs):
 
 ---
 
-## 8) Reporting Metrics 
+## 8) Reporting Metrics
 
-Primary optimization target/what the agent is trained to do: **Minimize assets damaged/lost**
+Primary optimization target: **Minimize assets damaged/lost**
 
-Additional reported metrics (already computed or directly derivable from current eval):
+Frozen benchmark metric definitions:
 
 - mean episodic return
-- standard deviation / variance across episodes
 - asset survival rate
 - containment success rate
-- mean final burned area
-- mean time to containment
-- mean resource efficiency
+- mean burned-area fraction: `(burned + burning + asset_burned) / 625`
+- mean time to containment, conditioned on successful containment only
+- mean resource efficiency: `successful_deployments / total_deployments`
+- standard deviation across seeds for each reported metric
+- wasted deployment rate
 - mean normalized burn ratio (optional in evaluator)
 
-Report these diagnostics during training:
+Important alignment notes:
 
-- train/val/holdout gap for each metric
+- pooled episode variance is not a substitute for seed-level aggregation
+- raw burned-cell count can still be logged, but the benchmark-facing metric should be the normalized burned-area fraction
+- holdout performance is for final reporting only and must not be used for tuning
+- the current temporal holdout dataset has only one unique seeded record, so it is a final diagnostic only until expanded
+
+Report these diagnostics during training checkpoints:
+
+- train/val gap for each metric
+- optional train/family-holdout gap for each metric
 - per-seed summary tables
-- baseline comparisons (`greedy`, `random`) against PPO
+- baseline comparisons (`greedy`, `random`) against learned methods
 
+## 9) Environment-Side Requirements For Benchmark Alignment
+
+The environment and evaluator together must expose enough information to compute the benchmark metrics exactly.
+
+Environment-side counters or `info` fields required for clean evaluation:
+
+- `assets_lost`
+- `step`
+- `heli_left`
+- `crew_left`
+- count of successful helicopter deployments
+- count of successful crew deployments
+- count of wasted deployment attempts
+- count of total deployment attempts
+
+Operational metric rules:
+
+- `mean_resource_efficiency = successful_deployments / total_deployments`
+- if `total_deployments == 0`, report `0.0`
+- `wasted_deployment_rate = wasted_deployments / total_deployment_attempts`
+- if `total_deployment_attempts == 0`, report `0.0`
+
+Evaluator-side aggregation requirements:
+
+- aggregate per seed first, then summarize across seeds
+- compute `time_to_containment` only on contained episodes
+- compute normalized burn ratio against the same scenario record and evaluation seed under the deterministic non-intervention baseline defined in `docs/planning/train-plan.md`
+- do not surface temporal holdout metrics during checkpoint evaluation in canonical runs
+- pass `scenario_families` explicitly for canonical train, validation, and family-holdout runs rather than relying on the environment default
+
+Verification requirement before full runs:
+
+- all of the above metrics must appear in a short smoke-test evaluation artifact before any full 5-seed training sweep is launched

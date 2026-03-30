@@ -639,6 +639,10 @@ class WildfireEnv(gym.Env):
         self.crew_cd: int = 0
         self.assets_lost: int = 0
         self.initial_asset_count: int = 0
+        self.successful_heli_deployments: int = 0
+        self.successful_crew_deployments: int = 0
+        self.wasted_deployment_attempts: int = 0
+        self.total_deployment_attempts: int = 0
         self._ignition_seed_used: int | None = None
         self._layout_seed_used: int | None = None
         self._ignition_rng: np.random.Generator | None = None
@@ -655,6 +659,10 @@ class WildfireEnv(gym.Env):
         self.grid = np.zeros((self.grid_size, self.grid_size), dtype=np.int32)
         self.step_count = 0
         self.assets_lost = 0
+        self.successful_heli_deployments = 0
+        self.successful_crew_deployments = 0
+        self.wasted_deployment_attempts = 0
+        self.total_deployment_attempts = 0
         self._active_parameter_record = None
         self._active_record_id = self._scenario.record_id
         self._ignition_seed_used = None
@@ -774,6 +782,12 @@ class WildfireEnv(gym.Env):
             "step": self.step_count,
             "assets_lost": self.assets_lost,
             "assets_remaining": self.initial_asset_count - self.assets_lost,
+            "successful_heli_deployments": self.successful_heli_deployments,
+            "successful_crew_deployments": self.successful_crew_deployments,
+            "successful_deployments": self.successful_heli_deployments
+            + self.successful_crew_deployments,
+            "wasted_deployment_attempts": self.wasted_deployment_attempts,
+            "total_deployment_attempts": self.total_deployment_attempts,
             "heli_left": self.heli_left,
             "crew_left": self.crew_left,
             "scenario": self._scenario,
@@ -1014,6 +1028,7 @@ class WildfireEnv(gym.Env):
         elif action == MOVE_W and c > 0:
             self.agent_pos[1] -= 1
         elif action == DEPLOY_HELICOPTER:
+            self.total_deployment_attempts += 1
             if self.heli_left > 0 and self.heli_cd == 0:
                 # Suppress 3x3 area around agent
                 suppressed = 0
@@ -1029,26 +1044,34 @@ class WildfireEnv(gym.Env):
                 self.heli_cd = self.heli_cooldown_duration
                 heli_used = True
                 if suppressed > 0:
+                    self.successful_heli_deployments += 1
                     reward += suppressed * 3.0
                 else:
+                    self.wasted_deployment_attempts += 1
                     reward -= 1.0  # wasted
             else:
+                self.wasted_deployment_attempts += 1
                 reward -= 1.0  # blocked by budget or cooldown
         elif action == DEPLOY_CREW:
+            self.total_deployment_attempts += 1
             if self.crew_left > 0 and self.crew_cd == 0:
                 cell = self.grid[r, c]
                 if cell == BURNING:
                     self.grid[r, c] = SUPPRESSED
+                    self.successful_crew_deployments += 1
                     reward += 3.0
                 elif cell == UNBURNED:
                     self.grid[r, c] = SUPPRESSED
+                    self.successful_crew_deployments += 1
                     reward += 2.0  # firebreak
                 else:
+                    self.wasted_deployment_attempts += 1
                     reward -= 1.0  # wasted
                 self.crew_left -= 1
                 self.crew_cd = self.crew_cooldown_duration
                 crew_used = True
             else:
+                self.wasted_deployment_attempts += 1
                 reward -= 1.0  # blocked by budget or cooldown
 
         return reward, heli_used, crew_used
