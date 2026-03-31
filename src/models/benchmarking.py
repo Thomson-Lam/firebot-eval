@@ -37,7 +37,7 @@ CANONICAL_TIMESTEPS_BY_ALGO = {
     "a2c": 200_000,
     "dqn": 200_000,
 }
-RUN_LABELS = ("smoke", "pilot", "final")
+RUN_LABELS = ("smoke", "pilot", "final", "karpathy")
 
 ROLLOUT_AGENT_TYPES = ("ppo", "a2c", "dqn", "greedy", "random", "non_intervention")
 

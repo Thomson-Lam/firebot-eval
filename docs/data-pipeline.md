@@ -221,6 +221,7 @@ Canonical integration note:
 - ignition family and asset layout remain simulator-side controls
 - seeded parameter records do not store explicit ignition/layout labels
 - `ignition_seed` and `layout_seed` make those simulator-side initializations reproducible
+- severity remains record-conditioned through `severity_bucket`; it is not an independently sampled family control variable
 
 Stored audit fields:
 

@@ -16,6 +16,8 @@ dependencies = [
     "xgboost>=3.0.0",
     "scikit-learn>=1.7.0",
     "pandas>=2.3.0",
+    "notebook>=7.5.5",
+    "seaborn>=0.13.2",
 ]
 
 [dependency-groups]

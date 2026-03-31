@@ -48,7 +48,7 @@ The final paper may report a longer PPO run separately only if all compared meth
 
 ### 2.1 Split semantics are two-dimensional
 
-Canonical benchmarking has two distinct notions of split, and both must be enforced explicitly in code.
+Benchmarking has two distinct notions of split, and both must be enforced explicitly in code.
 
 1. Temporal data split from the seeded scenario-record files:
    - train records: `scenario_parameter_records_seeded_train.json`
@@ -58,17 +58,23 @@ Canonical benchmarking has two distinct notions of split, and both must be enfor
    - in-distribution families: `TRAIN_FAMILIES`
    - held-out OOD families: `HELD_OUT_FAMILIES`
 
-Canonical meaning of each split:
+Family semantics note:
 
-- Train: train records + `TRAIN_FAMILIES`
-- Validation: validation records + `TRAIN_FAMILIES`
-- Family holdout: validation or expanded holdout records + `HELD_OUT_FAMILIES`
-- Temporal holdout: holdout records + explicit family list, reported separately from train/val
+- families are ignition/layout controls in benchmark mode
+- severity is record-conditioned (`severity_bucket` from the sampled dataset record), not an independently sampled family axis
+- therefore, family OOD claims should be framed as ignition/layout OOD under record-conditioned spread severity
+
+Meaning of each split:
+
+- Train: train records + in-distribution ignition/layout families
+- Validation: validation records + in-distribution ignition/layout families
+- Family holdout: validation or expanded holdout records + held-out ignition/layout families
+- Temporal holdout: holdout records + explicit ignition/layout family list, reported separately from train/val
 
 Implementation rule:
 
 - The training/evaluation runner must pass `scenario_families` explicitly.
-- Canonical runs must not rely on the environment default of `TRAIN_FAMILIES` when split semantics matter.
+- runs must not rely on the environment default of `TRAIN_FAMILIES` when split semantics matter.
 
 ### 2.2 Current holdout limitation
 
@@ -99,20 +105,21 @@ Add a benchmark-safe preset in code:
 
 The canonical preset should fill in the frozen benchmark defaults unless the user explicitly overrides them for an ablation run.
 
-Canonical preset values:
+Final preset values:
 
 - train dataset: `data/static/scenario_parameter_records_seeded_train.json`
 - validation dataset: `data/static/scenario_parameter_records_seeded_val.json`
 - holdout dataset: `data/static/scenario_parameter_records_seeded_holdout.json`
 - train/validation families: `TRAIN_FAMILIES`
 - family-holdout families: `HELD_OUT_FAMILIES`
+- severity source: sampled record `severity_bucket` (record-conditioned, not family-controlled)
 - checkpoint cadence: `20,000` env steps
 - checkpoint evaluation episodes: `20`
 - checkpoint-visible splits: `train`, `val`, and optional family holdout only
 - final evaluation episodes for train/val: `100`
 - benchmark-mode env creation enabled
 
-Holdout visibility rule for the canonical preset:
+Holdout visibility rule for the final preset config:
 
 - Do not surface temporal holdout metrics during checkpoint evaluation or hyperparameter sweeps.
 - Temporal holdout is final-reporting-only until the holdout dataset is expanded beyond one record.
@@ -137,9 +144,9 @@ Required `run_label` values:
 
 Purpose:
 
-- prevent smoke tests and pilot sweeps from overwriting canonical final benchmark artifacts
+- prevent smoke tests and pilot sweeps from overwriting the final benchmark artifacts
 
-Canonical per-seed artifacts:
+per-seed artifacts:
 
 - `config.json`
 - `checkpoint_metrics.json`
@@ -148,7 +155,7 @@ Canonical per-seed artifacts:
 - `last_model.zip`
 - `final_eval_best.json`
 
-Optional convenience exports outside the artifact directory are allowed, but they are not the canonical benchmark outputs.
+Optional convenience exports outside the artifact directory are allowed, but they are not the benchmark outputs.
 
 Artifact semantics:
 
@@ -245,16 +252,16 @@ Extend `src/models/evaluate_agents.py` so it can evaluate:
 
 The rollout loop can remain shared because all learned methods expose `model.predict(...)`.
 
-Add a matching benchmark-safe preset in code for evaluation so canonical runs do not rely on ad hoc CLI arguments.
+Add a matching benchmark-safe preset in code for evaluation so runs do not rely on ad hoc CLI arguments.
 
 The evaluation preset should:
 
-- use the canonical split dataset paths by default
+- use the final frozen split dataset paths by default
 - default to `100` episodes for train/val
 - use the benchmark metric schema defined in this file
 - evaluate the chosen artifact explicitly, such as `best_model.zip` or `last_model.zip`
 
-Canonical evaluation outputs should distinguish:
+evaluation outputs should distinguish:
 
 - `train`
 - `val`
@@ -336,7 +343,7 @@ At each checkpoint, record per split:
 - `mean_resource_efficiency`
 - `wasted_deployment_rate`
 
-Checkpoint-visible splits for canonical runs:
+Checkpoint-visible splits for runs:
 
 - `train`
 - `val`
@@ -429,7 +436,7 @@ Verify that:
 
 - train/val/holdout seeded files load in benchmark mode
 - split mismatches fail fast
-- explicit `scenario_families` are passed for canonical train/val/family-holdout runs
+- explicit `scenario_families` are passed for train/val/family-holdout runs
 - reset/step terminate correctly
 - observations remain length `636`
 - actions remain `Discrete(6)`
@@ -459,7 +466,7 @@ Run one short training job with checkpoint evaluation enabled and verify that:
 - the best-checkpoint selection rule behaves as expected
 - no fallback heuristic contaminates learned-agent evaluation
 - the benchmark preset produces the frozen protocol values without needing manual CLI reconstruction
-- temporal holdout metrics do not appear in checkpoint artifacts for canonical runs
+- temporal holdout metrics do not appear in checkpoint artifacts for runs
 
 ### 7.4 Reward sanity pilot
 
@@ -490,7 +497,7 @@ Only proceed to full benchmark if:
 1. Implement unified train/eval support for `ppo`, `a2c`, `dqn`.
 2. Add benchmark-safe presets for training and evaluation.
 3. Fix evaluator metric definitions to match this document.
-4. Add checkpoint evaluation, config serialization, and canonical artifact writing.
+4. Add checkpoint evaluation, config serialization, and artifact writing.
 5. Run smoke tests for all methods.
 6. Run one-seed pilot tuning sweeps.
 7. Freeze one config per algorithm.

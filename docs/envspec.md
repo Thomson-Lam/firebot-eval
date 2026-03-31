@@ -70,6 +70,7 @@ Important boundary:
 - ignition family and asset layout labels remain simulator-side controls
 - seeded records do not store explicit ignition/layout labels
 - seeds make simulator-side initialization reproducible
+- severity is record-conditioned from `severity_bucket` and is not independently controlled by `scenario_families`
 
 ---
 
@@ -83,7 +84,7 @@ Record loading and benchmark setup:
 
 Episode construction and parameter sampling:
 
-- `reset`: samples scenario family + parameter record, resets budgets/cooldowns/state, places assets, ignites fire
+- `reset`: samples ignition/layout family + parameter record, resets budgets/cooldowns/state, places assets, ignites fire
 - `_sample_parameter_record`: seed-stable shuffled sampling over loaded records
 - `_configure_initialization_rngs`: configures ignition/layout RNGs from record seeds
 
