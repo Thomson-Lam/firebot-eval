@@ -2,7 +2,7 @@
 static_dataset.py - Build frozen benchmark datasets from historical wildfire data.
 
 Canonical path:
-1. load Alberta historical wildfire incidents from `data/static/`
+1. load Alberta historical wildfire incidents from `data/static/raw/`
 2. normalize them into snapshot records
 3. optionally enrich with CFFDRS fire-danger fields
 4. compute environment-variable records for FireEnv
@@ -10,7 +10,7 @@ Canonical path:
 Run once, store the outputs, and train/evaluate only from the cached files.
 
 Example:
-    uv run python -m src.ingestion.static_dataset --target-count 100
+    uv run python -m src.ingestion.static_dataset --target-count 100 --output-dir data/static/v1 --raw-alberta-csv data/static/raw/fp-historical-wildfire-data-2006-2025.csv
 """
 
 from __future__ import annotations
@@ -37,8 +37,8 @@ except Exception:  # pragma: no cover - optional dependency
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_OUTPUT_DIR = Path("data/static")
-DEFAULT_ALBERTA_CSV = DEFAULT_OUTPUT_DIR / "fp-historical-wildfire-data-2006-2025.csv"
+DEFAULT_OUTPUT_DIR = Path("data/static/v1")
+DEFAULT_ALBERTA_CSV = Path("data/static/raw/fp-historical-wildfire-data-2006-2025.csv")
 
 WIND_DIR_TO_DEG = {
     "N": 0.0,

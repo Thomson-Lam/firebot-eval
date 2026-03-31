@@ -16,19 +16,22 @@ firebot/
 ├── fp-historical-wildfire-data-dictionary-2006-2025.pdf # from the dataset download
 ├── data/ 
 │   └── static/ 
-│       ├── fp-historical-wildfire-data-2006-2025.csv # raw Alberta historical wildfire CSV 
-│       ├── snapshot_records.json # full normalized snapshot records from raw CSV
-│       ├── snapshot_records_train.json # train-year snapshot subset
-│       ├── snapshot_records_val.json # validation-year snapshot subset
-│       ├── snapshot_records_holdout.json # holdout-year snapshot subset
-│       ├── scenario_parameter_records.json # full unseeded environment parameter records
-│       ├── scenario_parameter_records_train.json # train split unseeded records
-│       ├── scenario_parameter_records_val.json # validation split unseeded records
-│       ├── scenario_parameter_records_holdout.json # holdout split unseeded records
-│       ├── scenario_parameter_records_seeded.json # full seeded records with ignition/layout seeds
-│       ├── scenario_parameter_records_seeded_train.json # train runtime records
-│       ├── scenario_parameter_records_seeded_val.json # validation runtime records
-│       └── scenario_parameter_records_seeded_holdout.json # temporal holdout runtime records
+│       ├── raw/
+│       │   └── fp-historical-wildfire-data-2006-2025.csv # raw Alberta historical wildfire CSV
+│       ├── v1/
+│       │   ├── snapshot_records.json # full normalized snapshot records from raw CSV
+│       │   ├── snapshot_records_train.json # train-year snapshot subset
+│       │   ├── snapshot_records_val.json # validation-year snapshot subset
+│       │   ├── snapshot_records_holdout.json # holdout-year snapshot subset
+│       │   ├── scenario_parameter_records.json # full unseeded environment parameter records
+│       │   ├── scenario_parameter_records_train.json # train split unseeded records
+│       │   ├── scenario_parameter_records_val.json # validation split unseeded records
+│       │   ├── scenario_parameter_records_holdout.json # holdout split unseeded records
+│       │   ├── scenario_parameter_records_seeded.json # full seeded records with ignition/layout seeds
+│       │   ├── scenario_parameter_records_seeded_train.json # train runtime records
+│       │   ├── scenario_parameter_records_seeded_val.json # validation runtime records
+│       │   └── scenario_parameter_records_seeded_holdout.json # temporal holdout runtime records
+│       └── v2/ # optional cleaned dataset variant for retraining
 ├── docs/ 
 │   ├── data-pipeline.md 
 │   ├── envspec.md 
@@ -162,8 +165,16 @@ For more details, check `docs/data-pipeline.md`
 We run this command run to ingest our dataset (with a large cap to avoid split truncation):
 
 ```bash
-uv run python -m src.ingestion.static_dataset --target-count 50000 --raw-alberta-csv data/static/fp-historical-wildfire-data-2006-2025.csv
+uv run python -m src.ingestion.static_dataset --target-count 50000
 ```
+
+Or the following command for the full explicit paths:
+
+```bash
+uv run python -m src.ingestion.static_dataset --target-count 50000 --output-dir data/static/v1 --raw-alberta-csv data/static/raw/fp-historical-wildfire-data-2006-2025.csv
+```
+
+With default paths specified inside the data pipeline code: `data/static/raw/` for where the source dataset is; `data/static/v1` for where the initially compiled environment parameter records from the ingested data are
 
 This command builds data from the CSV and generates initialization seeds for ignition and asset layout for the corresponding environment. CFFDRS was not used to reduce confounding variables and any bias introduced due to incomplete CFFDRS data ingested for some specific fires.
 
