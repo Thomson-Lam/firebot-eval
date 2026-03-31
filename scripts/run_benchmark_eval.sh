@@ -10,7 +10,7 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-outputs/benchmark}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-training-outputs/training_1/outputs/benchmark}"
 RUN_LABEL="${RUN_LABEL:-final}"
 EVAL_SEEDS_CSV="${EVAL_SEEDS_CSV:-11,22,33,44,55}"
 EVAL_EPISODES="${EVAL_EPISODES:-100}"
