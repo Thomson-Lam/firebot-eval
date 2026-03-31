@@ -13,6 +13,7 @@ wheels/
 data/
 outputs/
 training-outputs/
+trainings.zip
 
 notebooks/.ipynb_checkpoints
 

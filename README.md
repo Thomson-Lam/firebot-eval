@@ -275,3 +275,7 @@ The builder also writes year-based split files for the benchmark:
 - `holdout`: `2024-2025`
 
 The dataset builder prints cleaning/drop summaries to stdout and uses progress bars when `tqdm` is available.
+
+## Using Notebooks
+
+The notebook details data analysis. After running, move `outputs/` to `training-outputs/` in the project root and launch the notebooks via `jupyter notebook` in `notebooks/`, to be able to run `notebooks/training_*_analysis.ipynb`. Run `data_audit.ipynb` after running the data pipeline once, and run `clean_data.ipynb` to reproduce data cleaning after ingestion. The training scripts inside `stages/` use the cleaned data for training.
