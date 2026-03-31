@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+
+# Re-exec under bash when invoked via `sh`.
+if [ -z "${BASH_VERSION:-}" ]; then
+  exec bash "$0" "$@"
+fi
+
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
