@@ -16,6 +16,9 @@ uv run python -m src.models.evaluate_agents \
   --ppo-model "$ARTIFACT_ROOT/smoke/ppo/seed_${SMOKE_SEED}/best_model.zip" \
   --a2c-model "$ARTIFACT_ROOT/smoke/a2c/seed_${SMOKE_SEED}/best_model.zip" \
   --dqn-model "$ARTIFACT_ROOT/smoke/dqn/seed_${SMOKE_SEED}/best_model.zip" \
+  --train-dataset "$TRAIN_DATASET" \
+  --val-dataset "$VAL_DATASET" \
+  --holdout-dataset "$HOLDOUT_DATASET" \
   --seeds "$SMOKE_SEED" \
   --episodes "$SMOKE_EVAL_EPISODES" \
   --run-label smoke \

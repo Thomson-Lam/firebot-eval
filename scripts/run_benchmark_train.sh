@@ -42,9 +42,11 @@ CANONICAL_PPO_TIMESTEPS=200000
 CANONICAL_A2C_TIMESTEPS=200000
 CANONICAL_DQN_TIMESTEPS=200000
 
-TRAIN_DATASET="data/static/scenario_parameter_records_seeded_train.json"
-VAL_DATASET="data/static/scenario_parameter_records_seeded_val.json"
-HOLDOUT_DATASET="data/static/scenario_parameter_records_seeded_holdout.json"
+DATA_VARIANT="${DATA_VARIANT:-v2}"
+DATASET_BASE="data/static/${DATA_VARIANT}"
+TRAIN_DATASET="${TRAIN_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_train.json}"
+VAL_DATASET="${VAL_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_val.json}"
+HOLDOUT_DATASET="${HOLDOUT_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_holdout.json}"
 
 for dataset in "$TRAIN_DATASET" "$VAL_DATASET" "$HOLDOUT_DATASET"; do
   if [[ ! -f "$dataset" ]]; then
@@ -78,6 +80,10 @@ echo "repro_canary_tol   : $REPRO_CANARY_TOL"
 echo "canonical_ckpt_int : $CANONICAL_CHECKPOINT_INTERVAL"
 echo "canonical_ckpt_eval: $CANONICAL_CHECKPOINT_EVAL_EPISODES"
 echo "canonical_final_eval: $CANONICAL_FINAL_EVAL_EPISODES"
+echo "data_variant       : $DATA_VARIANT"
+echo "train_dataset      : $TRAIN_DATASET"
+echo "val_dataset        : $VAL_DATASET"
+echo "holdout_dataset    : $HOLDOUT_DATASET"
 echo
 
 train_smoke() {
@@ -215,23 +221,34 @@ pilot_sweep_algo() { # hyperparam tuning
   case "$algo" in
     ppo)
       configs=(
-        "lr3e4_n512_ent001 --learning-rate 3e-4 --n-steps 512 --ent-coef 0.01"
-        "lr1e4_n1024_ent005 --learning-rate 1e-4 --n-steps 1024 --ent-coef 0.005"
-        "lr5e4_n256_ent002 --learning-rate 5e-4 --n-steps 256 --ent-coef 0.02"
+        "lr1e4_n512_ent001 --learning-rate 1e-4 --n-steps 512 --ent-coef 0.01"
+        "lr5e4_n512_ent001 --learning-rate 5e-4 --n-steps 512 --ent-coef 0.01"
+        "lr3e4_n256_ent001 --learning-rate 3e-4 --n-steps 256 --ent-coef 0.01"
+        "lr3e4_n1024_ent001 --learning-rate 3e-4 --n-steps 1024 --ent-coef 0.01"
+        "lr3e4_n512_ent005 --learning-rate 3e-4 --n-steps 512 --ent-coef 0.005"
+        "lr3e4_n512_ent002 --learning-rate 3e-4 --n-steps 512 --ent-coef 0.02"
       )
       ;;
     a2c)
       configs=(
-        "lr7e4_n5_ent001 --learning-rate 7e-4 --n-steps 5 --ent-coef 0.01"
-        "lr3e4_n20_ent005 --learning-rate 3e-4 --n-steps 20 --ent-coef 0.005"
-        "lr1e3_n10_ent002 --learning-rate 1e-3 --n-steps 10 --ent-coef 0.02"
+        "lr3e4_n5_ent001 --learning-rate 3e-4 --n-steps 5 --ent-coef 0.01"
+        "lr1e3_n5_ent001 --learning-rate 1e-3 --n-steps 5 --ent-coef 0.01"
+        "lr7e4_n10_ent001 --learning-rate 7e-4 --n-steps 10 --ent-coef 0.01"
+        "lr7e4_n20_ent001 --learning-rate 7e-4 --n-steps 20 --ent-coef 0.01"
+        "lr7e4_n5_ent005 --learning-rate 7e-4 --n-steps 5 --ent-coef 0.005"
+        "lr7e4_n5_ent002 --learning-rate 7e-4 --n-steps 5 --ent-coef 0.02"
       )
       ;;
     dqn)
       configs=(
-        "lr1e4_ef02_eps005_tu1000_buf100k --learning-rate 1e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 1000 --replay-buffer-size 100000"
-        "lr3e4_ef03_eps01_tu500_buf50k --learning-rate 3e-4 --exploration-fraction 0.3 --exploration-final-eps 0.1 --target-update-interval 500 --replay-buffer-size 50000"
-        "lr5e5_ef01_eps002_tu2000_buf200k --learning-rate 5e-5 --exploration-fraction 0.1 --exploration-final-eps 0.02 --target-update-interval 2000 --replay-buffer-size 200000"
+        "lr5e5_ef02_eps005_tu1000_buf100k --learning-rate 5e-5 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 1000 --replay-buffer-size 100000"
+        "lr3e4_ef02_eps005_tu1000_buf100k --learning-rate 3e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 1000 --replay-buffer-size 100000"
+        "lr1e4_ef01_eps002_tu1000_buf100k --learning-rate 1e-4 --exploration-fraction 0.1 --exploration-final-eps 0.02 --target-update-interval 1000 --replay-buffer-size 100000"
+        "lr1e4_ef03_eps01_tu1000_buf100k --learning-rate 1e-4 --exploration-fraction 0.3 --exploration-final-eps 0.1 --target-update-interval 1000 --replay-buffer-size 100000"
+        "lr1e4_ef02_eps005_tu500_buf100k --learning-rate 1e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 500 --replay-buffer-size 100000"
+        "lr1e4_ef02_eps005_tu2000_buf100k --learning-rate 1e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 2000 --replay-buffer-size 100000"
+        "lr1e4_ef02_eps005_tu1000_buf50k --learning-rate 1e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 1000 --replay-buffer-size 50000"
+        "lr1e4_ef02_eps005_tu1000_buf200k --learning-rate 1e-4 --exploration-fraction 0.2 --exploration-final-eps 0.05 --target-update-interval 1000 --replay-buffer-size 200000"
       )
       ;;
     *)
@@ -433,6 +450,9 @@ uv run python -m src.models.evaluate_agents \
   --ppo-model "$ARTIFACT_ROOT/smoke/ppo/seed_${SMOKE_SEED}/best_model.zip" \
   --a2c-model "$ARTIFACT_ROOT/smoke/a2c/seed_${SMOKE_SEED}/best_model.zip" \
   --dqn-model "$ARTIFACT_ROOT/smoke/dqn/seed_${SMOKE_SEED}/best_model.zip" \
+  --train-dataset "$TRAIN_DATASET" \
+  --val-dataset "$VAL_DATASET" \
+  --holdout-dataset "$HOLDOUT_DATASET" \
   --seeds "$SMOKE_SEED" \
   --episodes "$SMOKE_EVAL_EPISODES" \
   --run-label smoke \

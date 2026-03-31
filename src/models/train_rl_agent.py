@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,28 @@ def _parse_family_spec(value: str) -> tuple[str, str, str]:
     return (parts[0], parts[1], parts[2])
 
 
+def _assert_finite_metrics(metrics: dict[str, Any], *, context: str) -> None:
+    required_keys = (
+        "episodes",
+        "mean_return",
+        "asset_survival_rate",
+        "containment_success_rate",
+        "mean_burned_area_fraction",
+        "mean_resource_efficiency",
+        "wasted_deployment_rate",
+    )
+    missing = [key for key in required_keys if key not in metrics]
+    if missing:
+        raise RuntimeError(f"Malformed metrics for {context}: missing keys {missing}")
+
+    for key, value in metrics.items():
+        if isinstance(value, bool) or value is None:
+            continue
+        if isinstance(value, (int, float)):
+            if not math.isfinite(float(value)):
+                raise RuntimeError(f"Non-finite metric for {context}: {key}={value!r}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train benchmark RL agents for wildfire task")
     parser.add_argument("--algo", type=str, default="ppo", choices=ALGO_CHOICES)
@@ -201,6 +224,13 @@ def main() -> None:
     parser.add_argument("--no-normalized-burn-final", action="store_true")
 
     parser.add_argument("--learning-rate", type=float, default=None)
+    parser.add_argument(
+        "--lr-schedule",
+        type=str,
+        default="constant",
+        choices=("constant",),
+        help="Learning-rate schedule mode (canonical runs use constant)",
+    )
     parser.add_argument("--n-steps", type=int, default=None)
     parser.add_argument("--ent-coef", type=float, default=None)
     parser.add_argument("--exploration-fraction", type=float, default=None)
@@ -338,6 +368,7 @@ def main() -> None:
             "compute_normalized_burn_ratio": not args.no_normalized_burn_final,
         },
         "hyperparameters": hyperparams,
+        "learning_rate_schedule": args.lr_schedule,
     }
     _write_json(run_dir / "config.json", config_payload)
 
@@ -364,6 +395,10 @@ def main() -> None:
                 compute_normalized_burn_ratio=False,
             )
             split_metrics[split.name] = _single_seed_split_summary(split_eval)
+            _assert_finite_metrics(
+                split_metrics[split.name],
+                context=f"checkpoint split={split.name} steps={current_steps}",
+            )
 
         entry = {
             "algo": args.algo,
@@ -393,6 +428,8 @@ def main() -> None:
 
     checkpoint_entries[best_index]["selected_for_best"] = True
     best_entry = checkpoint_entries[best_index]
+    if "val" not in best_entry.get("splits", {}):
+        raise RuntimeError("Malformed checkpoint entry: missing val split for selection")
 
     _write_json(run_dir / "checkpoint_metrics.json", checkpoint_entries)
     _write_json(
@@ -434,6 +471,10 @@ def main() -> None:
             compute_normalized_burn_ratio=not args.no_normalized_burn_final,
         )
         final_split_metrics[split.name] = _single_seed_split_summary(final_eval)
+        _assert_finite_metrics(
+            final_split_metrics[split.name],
+            context=f"final split={split.name}",
+        )
 
     final_eval_payload: dict[str, Any] = {
         "algo": args.algo,
