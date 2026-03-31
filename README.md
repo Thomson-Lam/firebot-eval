@@ -51,10 +51,17 @@ firebot/
 │       ├── train_rl_agent.py # unified PPO/A2C/DQN trainer with checkpoint and final evaluation artifacts
 │       └── evaluate_agents.py # classdef for PPO/A2C/DQN plus greedy/random baselines
 ├── scripts/ 
-│   ├── run_benchmark_train.sh # bash script for smoke validation then full 5-seed benchmark training
+│   ├── run_benchmark_train.sh # legacy all-in-one bash runner (staged scripts are canonical)
 │   ├── run_benchmark_train.ps1 # powershell equivalent 
 │   ├── run_benchmark_eval.sh # bash script for post-training benchmark evaluation by seed
 │   └── run_benchmark_eval.ps1 # powershell equivalent 
+│   └── stages/
+│       ├── _common.sh # shared defaults, validation, and helper functions for staged runs
+│       ├── 01_karpathy_overfit.sh # one-record overfit checks
+│       ├── 02_smoke_train_and_repro.sh # smoke training + reproducibility canary
+│       ├── 03_smoke_eval.sh # smoke checkpoint artifact loading + sanity eval
+│       ├── 04_pilot_sweep.sh # one-seed validation-only pilot hyperparameter sweep
+│       └── 05_final_train.sh # canonical full 5-seed training with frozen protocol
 ├── tests/ 
 │   ├── conftest.py 
 │   └── models/ # environment and benchmark metric contract tests
@@ -176,12 +183,16 @@ uv run python -m src.ingestion.static_dataset --fire-records path/to/fire_record
 
 ### Training 
 
-For controlled and reproducible benchmark training, use the script wrappers in `scripts/`.
+For controlled and reproducible benchmark training, run the staged bash scripts in order.
 
 Run from project root on macOS/Linux (bash):
 
 ```bash
-./scripts/run_benchmark_train.sh
+./scripts/stages/01_karpathy_overfit.sh
+./scripts/stages/02_smoke_train_and_repro.sh
+./scripts/stages/03_smoke_eval.sh
+./scripts/stages/04_pilot_sweep.sh
+./scripts/stages/05_final_train.sh
 ```
 
 Run from project root on Windows (PowerShell):
@@ -190,23 +201,35 @@ Run from project root on Windows (PowerShell):
 ./scripts/run_benchmark_train.ps1
 ```
 
-Script runs:
+Staged bash flow:
 
-- Stage 1 (smoke): runs short validation training for `ppo`, `a2c`, `dqn` on one seed
-- Stage 2 (smoke eval): loads smoke `best_model.zip` artifacts and runs evaluator sanity checks
-- Stage 3 (formal): runs full canonical training for all three algorithms across 5 seeds (`11,22,33,44,55`)
-- Uses artifact root `outputs/benchmark/` and keeps default trainer settings for env count, timesteps, and checkpoint cadence on formal runs
+- Stage 1: Karpathy one-record overfit checks (`ppo`, `a2c`, `dqn`)
+- Stage 2: smoke training + reproducibility canary
+- Stage 3: smoke evaluation sanity check
+- Stage 4: validation-only pilot sweeps and winner selection
+- Stage 5: full canonical 5-seed training using frozen protocol values
 
-Training script environment overrides (optional):
+Shared staged-script environment overrides (optional):
 
 - `ARTIFACT_ROOT` (default `outputs/benchmark`)
 - `SMOKE_TIMESTEPS` (default `20000`, one canonical checkpoint interval)
 - `SMOKE_SEED` (default `11`)
 - `SMOKE_EVAL_EPISODES` (default `5`)
+- `RUN_REPRO_CANARY` (default `1`)
+- `REPRO_CANARY_TOL` (default `1e-9`)
+- `KARPATHY_TIMESTEPS` (default `10000`)
+- `KARPATHY_SEED` (default `11`)
+- `KARPATHY_FAMILY` (default `center,medium,A`)
+- `KARPATHY_CHECKPOINT_EVAL_EPISODES` (default `1`)
+- `PILOT_TIMESTEPS` (default `40000`)
+- `PILOT_SEED` (default `11`)
+- `RUN_KARPATHY_CHECK` (default `1`)
+- `RUN_PILOT_SWEEP` (default `1`)
+- `USE_PILOT_WINNERS` (default `1`)
 - `FINAL_SEEDS_CSV` (default `11,22,33,44,55`)
 - `ALGO_ORDER_CSV` (default `ppo,a2c,dqn`)
 
-After `run_benchmark_train` completes, run benchmark evaluation wrappers.
+After Stage 5 completes, run benchmark evaluation wrappers.
 
 Run from project root on macOS/Linux (bash):
 

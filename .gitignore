@@ -12,6 +12,7 @@ wheels/
 
 data/
 outputs/
+training-outputs/
 
 notebooks/.ipynb_checkpoints
 
