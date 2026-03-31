@@ -37,7 +37,7 @@ Interpretation rules:
 
 ---
 
-## Step 1: Plot and Analyze Baseline Results
+## Step 1: Plot and Analyze Baseline Results (Done)
 
 Purpose: quantify what happened in Step 0 before deciding how aggressively to rerun.
 
@@ -89,26 +89,7 @@ Add fail-fast checks during training/eval:
 
 ---
 
-## Step 3: Re-run on Original Data (Hardened)
-
-Purpose: generate paper-candidate results on the original data variant with hardened controls enabled.
-
-Checklist:
-
-- Re-run smoke + pilot on `data/static/v1/`.
-- Compare against Step 0 on key validation metrics and stability.
-- Add training-health diagnostics where available (gradient norms, loss trends, entropy, train-vs-val trajectories).
-- Confirm top pilot candidates with quick repeats (top-2 configs, 2 repeats each).
-- Freeze one config per algorithm and execute canonical 5-seed fixed-budget final runs.
-
-Reproducibility note:
-
-- Do not tune using holdout.
-- Do not mix pilot selection from one protocol/data variant with reporting on another without explicit disclosure.
-
----
-
-## Step 4: Reproduce on Cleaned Data and Compare
+## Step 3: Reproduce on Cleaned Data and Compare
 
 Purpose: quantify how data cleaning changes results under the same frozen training protocol.
 
