@@ -10,15 +10,17 @@ if ! command -v uv >/dev/null 2>&1; then
   exit 1
 fi
 
-ARTIFACT_ROOT="${ARTIFACT_ROOT:-outputs/benchmark}"
+ARTIFACT_ROOT="${ARTIFACT_ROOT:-training-outputs/training_1/outputs/benchmark}"
 RUN_LABEL="${RUN_LABEL:-final}"
 EVAL_SEEDS_CSV="${EVAL_SEEDS_CSV:-11,22,33,44,55}"
 EVAL_EPISODES="${EVAL_EPISODES:-100}"
 AGENTS="${AGENTS:-ppo,a2c,dqn,greedy,random}"
 
-TRAIN_DATASET="${TRAIN_DATASET:-data/static/scenario_parameter_records_seeded_train.json}"
-VAL_DATASET="${VAL_DATASET:-data/static/scenario_parameter_records_seeded_val.json}"
-HOLDOUT_DATASET="${HOLDOUT_DATASET:-data/static/scenario_parameter_records_seeded_holdout.json}"
+DATA_VARIANT="${DATA_VARIANT:-v2}"
+DATASET_BASE="data/static/${DATA_VARIANT}"
+TRAIN_DATASET="${TRAIN_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_train.json}"
+VAL_DATASET="${VAL_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_val.json}"
+HOLDOUT_DATASET="${HOLDOUT_DATASET:-$DATASET_BASE/scenario_parameter_records_seeded_holdout.json}"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$ARTIFACT_ROOT/$RUN_LABEL/eval}"
 INCLUDE_FAMILY_HOLDOUT="${INCLUDE_FAMILY_HOLDOUT:-0}"
@@ -42,6 +44,10 @@ echo "eval_seeds             : $EVAL_SEEDS_CSV"
 echo "eval_episodes_per_seed : $EVAL_EPISODES"
 echo "agents                 : $AGENTS"
 echo "output_dir             : $OUTPUT_DIR"
+echo "data_variant           : $DATA_VARIANT"
+echo "train_dataset          : $TRAIN_DATASET"
+echo "val_dataset            : $VAL_DATASET"
+echo "holdout_dataset        : $HOLDOUT_DATASET"
 echo
 
 for seed in "${EVAL_SEEDS[@]}"; do

@@ -25,9 +25,9 @@ from src.models.fire_env import (
     load_scenario_parameter_records,
 )
 
-CANONICAL_TRAIN_DATASET = Path("data/static/scenario_parameter_records_seeded_train.json")
-CANONICAL_VAL_DATASET = Path("data/static/scenario_parameter_records_seeded_val.json")
-CANONICAL_HOLDOUT_DATASET = Path("data/static/scenario_parameter_records_seeded_holdout.json")
+CANONICAL_TRAIN_DATASET = Path("data/static/v2/scenario_parameter_records_seeded_train.json")
+CANONICAL_VAL_DATASET = Path("data/static/v2/scenario_parameter_records_seeded_val.json")
+CANONICAL_HOLDOUT_DATASET = Path("data/static/v2/scenario_parameter_records_seeded_holdout.json")
 CANONICAL_TRAINING_SEEDS = [11, 22, 33, 44, 55]
 CANONICAL_CHECKPOINT_INTERVAL_STEPS = 20_000
 CANONICAL_CHECKPOINT_EVAL_EPISODES = 20

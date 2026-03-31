@@ -1,18 +1,27 @@
 # Training Hardening Plan
 
-This document defines a staged hardening workflow before launching paper-facing benchmark runs.
+This document defines the execution order for turning the existing baseline run into paper-defensible benchmark evidence.
 
-It assumes one full run has already been executed and should now be treated as a baseline sanity pass, not the final benchmark evidence.
+One full run already exists and should be treated as a baseline sanity pass, not final evidence.
 
 ---
 
-## Step 0: Dummy Run
+## Execution Sequence
 
-Purpose: establish a baseline run with the current unclean pipeline and confirm the end-to-end system is operational.
+1. Plot and analyze the existing baseline run in a notebook.
+2. Harden the training and evaluation pipeline.
+3. Re-run on the original data variant with hardened controls.
+4. Reproduce on cleaned data and compare changes.
+
+---
+
+## Step 0: Baseline Run (Completed)
+
+Purpose: preserve and interpret the initial run as a reference point.
 
 Current baseline configuration:
 
-- Data variant: original seeded datasets under `data/static/`
+- Data variant: original seeded datasets under `data/static/v1/`
 - Algorithms: `PPO`, `A2C`, `DQN`
 - Final budget: `200,000` steps per algorithm per seed
 - Seed protocol: canonical 5 seeds (`11,22,33,44,55`) for final runs
@@ -20,24 +29,42 @@ Current baseline configuration:
 - Checkpoint model selection: highest `val.asset_survival_rate`, tie-breaker `val.mean_return`
 - Final artifact for reporting: `best_model.zip` (not `last_model.zip`)
 
-Step 0 interpretation rules:
+Interpretation rules:
 
-- Treat this run as a reference point for stability and feasibility.
-- Do not treat it as final paper evidence until Step 1-3 hardening is complete.
+- Treat this run as a stability and feasibility baseline only.
+- Do not use Step 0 as final paper evidence.
 - Preserve all Step 0 artifacts for regression comparison.
 
 ---
 
-## Step 1: Pilot Hardening
+## Step 1: Plot and Analyze Baseline Results (Done)
 
-Purpose: reduce debugging risk and improve interpretability before expensive reruns.
+Purpose: quantify what happened in Step 0 before deciding how aggressively to rerun.
 
-### 1.1 One-factor-at-a-time pilot sweeps
+Checklist:
+
+- Unpack and inspect the completed run artifacts (for example `training_0.zip`).
+- Build a notebook summary of checkpoint/final metrics per algorithm and seed.
+- Plot trajectories for key validation metrics (`asset_survival_rate`, `mean_return`, burned-area metrics).
+- Confirm selection behavior (`best_checkpoint.json` and `best_model.zip` follow the stated rule).
+- Record instability signals (high variance, collapse windows, missing/malformed artifacts).
+
+Output:
+
+- A short Step 0 baseline analysis notebook and a written go/no-go note for hardening depth.
+
+---
+
+## Step 2: Harden Training and Evaluation
+
+Purpose: reduce debugging risk and increase defensibility before reruns.
+
+### 2.1 One-factor-at-a-time pilot sweeps
 
 For each algorithm:
 
 1. Run small pilot sweeps where only one hyperparameter changes at a time.
-2. Keep all other hyperparameters fixed to algorithm defaults or current pilot anchor values.
+2. Keep all other hyperparameters fixed to defaults or current anchor values.
 3. Use validation-only selection for pilot ranking.
 
 Recommended order:
@@ -46,88 +73,42 @@ Recommended order:
 - `A2C`: learning rate -> `n_steps` -> entropy coefficient
 - `DQN`: learning rate -> exploration params -> target update interval -> replay buffer size
 
-Why: if performance changes unexpectedly, attribution is immediate and debugging is faster.
+### 2.2 Learning-rate schedule explicitness
 
-### 1.2 Learning-rate schedule explicitness
+- Keep constant learning rate in pilot/debug unless schedule testing is an explicit ablation.
+- Record in config/logs when no scheduler is active.
+- If scheduler is tested, label it clearly and isolate it from canonical results.
 
-- Keep constant learning rate in pilot/debug unless a schedule is explicitly tested as an ablation.
-- Record in run config/logs that no scheduler is active.
-- If a scheduler is tested later, it must be clearly labeled and isolated from canonical results.
-
-### 1.3 Early stopping policy
-
-- Allow optional early stopping only in `pilot` or debug runs for faster iteration.
-- Do not use early stopping in canonical final benchmark runs.
-- Final benchmark remains fixed-budget for fairness (`200,000` per algorithm per seed).
-
-### 1.4 NaN and instability guardrails
+### 2.3 NaN and instability guardrails
 
 Add fail-fast checks during training/eval:
 
-- Abort if any non-finite metric/loss appears (`NaN`, `inf`, `-inf`).
-- Abort if checkpoint artifacts are malformed or missing expected keys.
-- Flag severe instability patterns (for example prolonged metric collapse) for manual review.
+- Abort on any non-finite metric/loss (`NaN`, `inf`, `-inf`).
+- Abort when checkpoint artifacts are malformed or missing required keys.
+- Flag severe instability patterns for manual review.
 
 ---
 
-## Step 2: Re-run and Data Audit Decision
+## Step 3: Reproduce on Cleaned Data and Compare
 
-Purpose: re-run after Step 1 hardening and decide whether dataset cleaning is required.
+Purpose: quantify how data cleaning changes results under the same frozen training protocol.
 
-### 2.1 Re-run hardened pilot
+Checklist:
 
-- Re-run smoke + pilot with hardening controls enabled.
-- Compare against Step 0 baseline on key validation metrics and stability.
-
-### 2.2 Data outlier and null audit
-
-- Run the audit notebook: `notebooks/data_outlier_audit.ipynb`.
+- Run data audit notebook: `notebooks/data_outlier_audit.ipynb`.
 - Inspect outliers, invalid ranges, missing fields, split consistency, and duplicates.
-- Decide if cleaning is required based on documented findings.
+- If cleaning is justified, build cleaned artifacts under `data/static/v2/`.
+- Regenerate all split artifacts consistently from the cleaned source (no overwrite of `v1`).
+- Re-run frozen benchmark protocol on `v2` and compare against `v1`.
+- Label cleaned-data runs explicitly in metadata/run labels.
 
-### 2.3 If cleaning is required
+Comparison rule:
 
-Use strict versioning and isolation:
-
-- Save cleaned variants under `data/static/clean/`.
-- Regenerate all split artifacts consistently from the cleaned source.
-- Keep old and cleaned artifacts side-by-side (no overwrite).
-- Save model weights and run artifacts before rerunning on cleaned data.
-- Label cleaned-data runs explicitly (for example run label suffix or metadata flag).
-
-Reproducibility note:
-
-- Do not mix pilot selection on one data variant with final reporting on another without clear disclosure.
+- Keep budget, seeds, selection rule, and evaluation protocol identical between `v1` and `v2`.
 
 ---
 
-## Step 3: Defensibility and Final Freeze
-
-Purpose: increase confidence in model health and lock benchmark settings before full reporting runs.
-
-### 3.1 Training-health diagnostics
-
-Add periodic diagnostics per algorithm where available:
-
-- gradient norm trends
-- value loss / TD loss trends
-- entropy (for policy-gradient methods)
-- checkpoint metric trajectories for train vs val
-
-### 3.2 Instability-aware pilot confirmation
-
-- For each algorithm, take top-2 pilot candidates.
-- Run 2 quick repeats per candidate.
-- Use aggregate validation ranking with instability-aware tie-breaking.
-
-### 3.3 Freeze and execute final benchmark
-
-- Freeze one hyperparameter config per algorithm.
-- Freeze data variant (`original` or specific `clean` version).
-- Run canonical fixed-budget benchmark over 5 seeds.
-- Report only frozen-protocol results as primary evidence.
-
-### Step 3 Acceptance Criteria
+## Acceptance Criteria
 
 | Area | Criterion | Threshold / Rule | Action if Failed |
 |---|---|---|---|
@@ -145,9 +126,9 @@ Add periodic diagnostics per algorithm where available:
 
 ## Reporting Notes
 
-When writing paper-facing results after hardening:
+When writing paper-facing results:
 
 - explicitly state fixed-budget protocol and seed count
 - explicitly state model-selection rule
-- explicitly state data variant used (`original` or `clean/*`)
+- explicitly state data variant used (`v1` original or `v2` cleaned)
 - clearly separate pilot diagnostics from final benchmark evidence
