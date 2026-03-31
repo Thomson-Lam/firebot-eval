@@ -144,6 +144,15 @@ def _families_to_jsonable(families: list[tuple[str, str, str]]) -> list[list[str
     return [list(family) for family in families]
 
 
+def _parse_family_spec(value: str) -> tuple[str, str, str]:
+    parts = [part.strip() for part in value.split(",")]
+    if len(parts) != 3 or any(not part for part in parts):
+        raise ValueError(
+            f"Invalid family spec '{value}'. Expected format: ignition,severity,layout"
+        )
+    return (parts[0], parts[1], parts[2])
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train benchmark RL agents for wildfire task")
     parser.add_argument("--algo", type=str, default="ppo", choices=ALGO_CHOICES)
@@ -164,6 +173,24 @@ def main() -> None:
     parser.add_argument("--train-dataset", type=Path, default=None)
     parser.add_argument("--val-dataset", type=Path, default=None)
     parser.add_argument("--holdout-dataset", type=Path, default=None)
+    parser.add_argument(
+        "--train-family",
+        type=str,
+        default=None,
+        help="Optional single-family override for train split (ignition,severity,layout)",
+    )
+    parser.add_argument(
+        "--val-family",
+        type=str,
+        default=None,
+        help="Optional single-family override for val split (ignition,severity,layout)",
+    )
+    parser.add_argument(
+        "--family-holdout-family",
+        type=str,
+        default=None,
+        help="Optional single-family override for family holdout split (ignition,severity,layout)",
+    )
 
     parser.add_argument("--checkpoint-interval", type=int, default=None)
     parser.add_argument("--checkpoint-eval-episodes", type=int, default=None)
@@ -189,8 +216,6 @@ def main() -> None:
         print(f"Failed to load benchmark preset: {exc}")
         sys.exit(1)
 
-    del args.benchmark_preset  # canonical is currently the only supported preset
-
     total_timesteps = args.timesteps or int(preset["total_timesteps"])
     checkpoint_interval = args.checkpoint_interval or int(preset["checkpoint_interval_steps"])
     checkpoint_eval_episodes = args.checkpoint_eval_episodes or int(
@@ -205,6 +230,13 @@ def main() -> None:
     train_families = list(preset["train_families"])
     val_families = list(preset["val_families"])
     family_holdout_families = list(preset["family_holdout_families"])
+
+    if args.train_family is not None:
+        train_families = [_parse_family_spec(args.train_family)]
+    if args.val_family is not None:
+        val_families = [_parse_family_spec(args.val_family)]
+    if args.family_holdout_family is not None:
+        family_holdout_families = [_parse_family_spec(args.family_holdout_family)]
 
     train_records = load_records(train_dataset, expected_split="train")
     val_records = load_records(val_dataset, expected_split="val")

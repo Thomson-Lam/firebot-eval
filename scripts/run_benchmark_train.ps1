@@ -14,6 +14,8 @@ $SmokeSeed = if ($env:SMOKE_SEED) { [int]$env:SMOKE_SEED } else { 11 }
 $SmokeEvalEpisodes = if ($env:SMOKE_EVAL_EPISODES) { [int]$env:SMOKE_EVAL_EPISODES } else { 5 }
 $KarpathyTimesteps = if ($env:KARPATHY_TIMESTEPS) { [int]$env:KARPATHY_TIMESTEPS } else { 10000 }
 $KarpathySeed = if ($env:KARPATHY_SEED) { [int]$env:KARPATHY_SEED } else { 11 }
+$KarpathyFamily = if ($env:KARPATHY_FAMILY) { $env:KARPATHY_FAMILY } else { "center,medium,A" }
+$KarpathyCheckpointEvalEpisodes = if ($env:KARPATHY_CHECKPOINT_EVAL_EPISODES) { [int]$env:KARPATHY_CHECKPOINT_EVAL_EPISODES } else { 1 }
 $PilotTimesteps = if ($env:PILOT_TIMESTEPS) { [int]$env:PILOT_TIMESTEPS } else { 40000 }
 $PilotSeed = if ($env:PILOT_SEED) { [int]$env:PILOT_SEED } else { 11 }
 $FinalSeedsCsv = if ($env:FINAL_SEEDS_CSV) { $env:FINAL_SEEDS_CSV } else { "11,22,33,44,55" }
@@ -53,6 +55,8 @@ Write-Host "smoke_timesteps      : $SmokeTimesteps"
 Write-Host "smoke_eval_episodes  : $SmokeEvalEpisodes"
 Write-Host "karpathy_seed        : $KarpathySeed"
 Write-Host "karpathy_timesteps   : $KarpathyTimesteps"
+Write-Host "karpathy_family      : $KarpathyFamily"
+Write-Host "karpathy_ckpt_eps    : $KarpathyCheckpointEvalEpisodes"
 Write-Host "pilot_seed           : $PilotSeed"
 Write-Host "pilot_timesteps      : $PilotTimesteps"
 Write-Host "final_seeds          : $FinalSeedsCsv"
@@ -128,7 +132,11 @@ records = payload.get("records", []) if isinstance(payload, dict) else payload
 if not records:
     raise SystemExit(f"No records found in {src}")
 
-record = dict(records[0])
+records_sorted = sorted(
+    records,
+    key=lambda rec: float(rec.get("base_spread_prob", 1.0)),
+)
+record = dict(records_sorted[0])
 record["split"] = split
 dst.parent.mkdir(parents=True, exist_ok=True)
 dst.write_text(
@@ -170,11 +178,13 @@ function Invoke-KarpathyCheck {
         "--seed", "$KarpathySeed",
         "--timesteps", "$KarpathyTimesteps",
         "--envs", "1",
+        "--train-family", $KarpathyFamily,
+        "--val-family", $KarpathyFamily,
         "--train-dataset", $TrainOne,
         "--val-dataset", $ValOne,
         "--holdout-dataset", $HoldoutOne,
         "--checkpoint-interval", "1000",
-        "--checkpoint-eval-episodes", "10",
+        "--checkpoint-eval-episodes", "$KarpathyCheckpointEvalEpisodes",
         "--final-eval-episodes", "20",
         "--artifact-root", $ArtifactRoot
     )

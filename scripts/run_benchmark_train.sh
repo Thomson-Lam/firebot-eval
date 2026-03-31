@@ -16,6 +16,8 @@ SMOKE_SEED="${SMOKE_SEED:-11}"
 SMOKE_EVAL_EPISODES="${SMOKE_EVAL_EPISODES:-5}"
 KARPATHY_TIMESTEPS="${KARPATHY_TIMESTEPS:-10000}"
 KARPATHY_SEED="${KARPATHY_SEED:-11}"
+KARPATHY_FAMILY="${KARPATHY_FAMILY:-center,medium,A}"
+KARPATHY_CHECKPOINT_EVAL_EPISODES="${KARPATHY_CHECKPOINT_EVAL_EPISODES:-1}"
 PILOT_TIMESTEPS="${PILOT_TIMESTEPS:-40000}"
 PILOT_SEED="${PILOT_SEED:-11}"
 FINAL_SEEDS_CSV="${FINAL_SEEDS_CSV:-11,22,33,44,55}"
@@ -57,6 +59,8 @@ echo "smoke_timesteps    : $SMOKE_TIMESTEPS"
 echo "smoke_eval_episodes: $SMOKE_EVAL_EPISODES"
 echo "karpathy_seed      : $KARPATHY_SEED"
 echo "karpathy_timesteps : $KARPATHY_TIMESTEPS"
+echo "karpathy_family    : $KARPATHY_FAMILY"
+echo "karpathy_ckpt_eps  : $KARPATHY_CHECKPOINT_EVAL_EPISODES"
 echo "pilot_seed         : $PILOT_SEED"
 echo "pilot_timesteps    : $PILOT_TIMESTEPS"
 echo "final_seeds        : $FINAL_SEEDS_CSV"
@@ -122,7 +126,11 @@ records = payload.get("records", []) if isinstance(payload, dict) else payload
 if not records:
     raise SystemExit(f"No records found in {src}")
 
-record = dict(records[0])
+records_sorted = sorted(
+    records,
+    key=lambda rec: float(rec.get("base_spread_prob", 1.0)),
+)
+record = dict(records_sorted[0])
 record["split"] = split
 dst.parent.mkdir(parents=True, exist_ok=True)
 dst.write_text(
@@ -162,11 +170,13 @@ karpathy_check() {
     --seed "$KARPATHY_SEED" \
     --timesteps "$KARPATHY_TIMESTEPS" \
     --envs 1 \
+    --train-family "$KARPATHY_FAMILY" \
+    --val-family "$KARPATHY_FAMILY" \
     --train-dataset "$train_one" \
     --val-dataset "$val_one" \
     --holdout-dataset "$holdout_one" \
     --checkpoint-interval 1000 \
-    --checkpoint-eval-episodes 10 \
+    --checkpoint-eval-episodes "$KARPATHY_CHECKPOINT_EVAL_EPISODES" \
     --final-eval-episodes 20 \
     --artifact-root "$ARTIFACT_ROOT"
 

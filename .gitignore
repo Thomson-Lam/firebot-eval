@@ -13,6 +13,8 @@ wheels/
 data/
 outputs/
 
+notebooks/.ipynb_checkpoints
+
 #logs
 wandb
 
