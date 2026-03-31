@@ -21,6 +21,8 @@ $AlgoOrderCsv = if ($env:ALGO_ORDER_CSV) { $env:ALGO_ORDER_CSV } else { "ppo,a2c
 $RunKarpathyCheck = if ($env:RUN_KARPATHY_CHECK) { [int]$env:RUN_KARPATHY_CHECK } else { 1 }
 $RunPilotSweep = if ($env:RUN_PILOT_SWEEP) { [int]$env:RUN_PILOT_SWEEP } else { 1 }
 $UsePilotWinners = if ($env:USE_PILOT_WINNERS) { [int]$env:USE_PILOT_WINNERS } else { 1 }
+$RunReproCanary = if ($env:RUN_REPRO_CANARY) { [int]$env:RUN_REPRO_CANARY } else { 1 }
+$ReproCanaryTol = if ($env:REPRO_CANARY_TOL) { [double]$env:REPRO_CANARY_TOL } else { 1e-9 }
 
 # Frozen canonical benchmark protocol values.
 $CanonicalCheckpointInterval = 20000
@@ -57,13 +59,18 @@ Write-Host "final_seeds          : $FinalSeedsCsv"
 Write-Host "run_karpathy_check   : $RunKarpathyCheck"
 Write-Host "run_pilot_sweep      : $RunPilotSweep"
 Write-Host "use_pilot_winners    : $UsePilotWinners"
+Write-Host "run_repro_canary     : $RunReproCanary"
+Write-Host "repro_canary_tol     : $ReproCanaryTol"
 Write-Host "canonical_ckpt_int   : $CanonicalCheckpointInterval"
 Write-Host "canonical_ckpt_eval  : $CanonicalCheckpointEvalEpisodes"
 Write-Host "canonical_final_eval : $CanonicalFinalEvalEpisodes"
 Write-Host ""
 
 function Invoke-SmokeTrain {
-    param([Parameter(Mandatory = $true)][string]$Algo)
+    param(
+        [Parameter(Mandatory = $true)][string]$Algo,
+        [Parameter(Mandatory = $true)][string]$Root
+    )
 
     Write-Host "[SMOKE] Training $Algo (seed=$SmokeSeed, timesteps=$SmokeTimesteps)"
     & uv @(
@@ -78,7 +85,25 @@ function Invoke-SmokeTrain {
         "--checkpoint-interval", "$CanonicalCheckpointInterval",
         "--checkpoint-eval-episodes", "$CanonicalCheckpointEvalEpisodes",
         "--final-eval-episodes", "$CanonicalFinalEvalEpisodes",
-        "--artifact-root", $ArtifactRoot
+        "--artifact-root", $Root
+    )
+}
+
+function Invoke-ReproCanary {
+    param([Parameter(Mandatory = $true)][string]$Algo)
+
+    $CanaryRoot = Join-Path -Path $ArtifactRoot -ChildPath "repro_canary"
+    Write-Host "[REPRO] Re-running smoke for $Algo with identical seed/config"
+    Invoke-SmokeTrain -Algo $Algo -Root $CanaryRoot
+
+    & uv @(
+        "run", "python", "scripts/canary.py",
+        "--baseline-root", $ArtifactRoot,
+        "--candidate-root", $CanaryRoot,
+        "--run-label", "smoke",
+        "--algo", $Algo,
+        "--seed", "$SmokeSeed",
+        "--tol", "$ReproCanaryTol"
     )
 }
 
@@ -402,7 +427,10 @@ else {
 Write-Host ""
 Write-Host "== Stage 2/5: Algorithm smoke training =="
 foreach ($algo in $AlgoOrder) {
-    Invoke-SmokeTrain -Algo $algo
+    Invoke-SmokeTrain -Algo $algo -Root $ArtifactRoot
+    if ($RunReproCanary -eq 1) {
+        Invoke-ReproCanary -Algo $algo
+    }
 }
 
 Write-Host ""

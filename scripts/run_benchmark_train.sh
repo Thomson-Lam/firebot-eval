@@ -23,6 +23,8 @@ ALGO_ORDER_CSV="${ALGO_ORDER_CSV:-ppo,a2c,dqn}"
 RUN_KARPATHY_CHECK="${RUN_KARPATHY_CHECK:-1}"
 RUN_PILOT_SWEEP="${RUN_PILOT_SWEEP:-1}"
 USE_PILOT_WINNERS="${USE_PILOT_WINNERS:-1}"
+RUN_REPRO_CANARY="${RUN_REPRO_CANARY:-1}"
+REPRO_CANARY_TOL="${REPRO_CANARY_TOL:-1e-9}"
 
 # Benchmark values according to training plan
 CANONICAL_CHECKPOINT_INTERVAL=20000
@@ -61,6 +63,8 @@ echo "final_seeds        : $FINAL_SEEDS_CSV"
 echo "run_karpathy_check : $RUN_KARPATHY_CHECK"
 echo "run_pilot_sweep    : $RUN_PILOT_SWEEP"
 echo "use_pilot_winners  : $USE_PILOT_WINNERS"
+echo "run_repro_canary   : $RUN_REPRO_CANARY"
+echo "repro_canary_tol   : $REPRO_CANARY_TOL"
 echo "canonical_ckpt_int : $CANONICAL_CHECKPOINT_INTERVAL"
 echo "canonical_ckpt_eval: $CANONICAL_CHECKPOINT_EVAL_EPISODES"
 echo "canonical_final_eval: $CANONICAL_FINAL_EVAL_EPISODES"
@@ -68,6 +72,7 @@ echo
 
 train_smoke() {
   local algo="$1"
+  local artifact_root="$2"
   echo "[SMOKE] Training $algo (seed=$SMOKE_SEED, timesteps=$SMOKE_TIMESTEPS)"
   uv run python -m src.models.train_rl_agent \
     --algo "$algo" \
@@ -80,7 +85,23 @@ train_smoke() {
     --checkpoint-interval "$CANONICAL_CHECKPOINT_INTERVAL" \
     --checkpoint-eval-episodes "$CANONICAL_CHECKPOINT_EVAL_EPISODES" \
     --final-eval-episodes "$CANONICAL_FINAL_EVAL_EPISODES" \
-    --artifact-root "$ARTIFACT_ROOT"
+    --artifact-root "$artifact_root"
+}
+
+repro_canary_smoke() {
+  local algo="$1"
+  local canary_root="$ARTIFACT_ROOT/repro_canary"
+
+  echo "[REPRO] Re-running smoke for $algo with identical seed/config"
+  train_smoke "$algo" "$canary_root"
+
+  uv run python scripts/canary.py \
+    --baseline-root "$ARTIFACT_ROOT" \
+    --candidate-root "$canary_root" \
+    --run-label smoke \
+    --algo "$algo" \
+    --seed "$SMOKE_SEED" \
+    --tol "$REPRO_CANARY_TOL"
 }
 
 build_single_record_dataset() {
@@ -383,7 +404,10 @@ fi
 echo
 echo "== Stage 2/5: Algo smoke training check =="
 for algo in "${ALGO_ORDER[@]}"; do
-  train_smoke "$algo"
+  train_smoke "$algo" "$ARTIFACT_ROOT"
+  if [[ "$RUN_REPRO_CANARY" == "1" ]]; then
+    repro_canary_smoke "$algo"
+  fi
 done
 
 echo
