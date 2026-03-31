@@ -15,7 +15,7 @@ One full run already exists and should be treated as a baseline sanity pass, not
 
 ---
 
-## Step 0: Baseline Run (Already Completed)
+## Step 0: Baseline Run (Completed)
 
 Purpose: preserve and interpret the initial run as a reference point.
 
