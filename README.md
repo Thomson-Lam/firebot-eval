@@ -1,59 +1,82 @@
-# FireGrid
+# Firebot: An Empirical Evaluation of RL Agents on Wildfire Environments  
 
-This project is an empirical RL benchmark for wildfire tactical suppression. We compare DQN, A2C, PPO, and heuristic baselines on a 25x25 grid environment with critical assets and finite suppression budgets.
+This project is an empirical RL benchmark for wildfire tactical suppression. We compare DQN, A2C, PPO, and random and greedy baselines on a 25x25 grid environment with critical assets and finite suppression budgets.
 
 The physics informed environment and built environment records from the [Alberta Historical Wildfires Database](https://open.alberta.ca/opendata/wildfire-data).
+
+## Our Process  
+
+We ingested data from the Alberta Historical Wildfires Database, then built environment snapshots with a seeded random initialization for starting positions of fires and firefighter agents. We performed our first training run on the dataset directly from the data pipeline with only schema validation, and evaluated results inside `notebooks/training_0_analysis.ipynb`; we then extensively did a data audit (`notebooks/data_audit.ipynb`), cleaned the data (`notebooks/clean_data.ipynb`) and re-ran the full training process again. For both runs, we carried out the same training process: 
+
+1. Overfitting on a single batch to check model architecture 
+2. Smoke training run + seed behavior checks 
+3. Smoke test evaluation check 
+4. hyperparameter sweep on the validation set 
+5. Full 5-seed training (trained seeds 11, 22, 33, 44, 55) for each model with hyperparameters from 4
+
+We then ran the notebooks for analysis inside `notebooks`, `notebooks/training_<NUMBER>_analysis.ipynb`.
+
+We did not include the 24 total models trained for both training runs in this GitHub repo, but we included our analysis of the results and our process in notebooks. To see our process and the results, please refer to the setup below, and open the notebooks and the relevant plots inside `notebook` to review our results directly. We have also included instructions to run the full data ingestion pipeline and training pipeline for reproducing. For more details, please refer to `docs/` and the file tree below.
 
 ## Project Tree
 
 ```text
-firebot/ 
-├── README.md 
-├── pyproject.toml 
-├── uv.lock 
-├── ruff.toml 
-├── lefthook.yml 
+firebot/
+├── README.md
+├── pyproject.toml
+├── uv.lock
+├── ruff.toml
+├── lefthook.yml
+├── .env.example
+├── .python-version
 ├── fp-historical-wildfire-data-dictionary-2006-2025.pdf # from the dataset download
-├── data/ 
-│   └── static/ 
-│       ├── raw/
-│       │   └── fp-historical-wildfire-data-2006-2025.csv # raw Alberta historical wildfire CSV
-│       ├── v1/
-│       │   ├── snapshot_records.json # full normalized snapshot records from raw CSV
-│       │   ├── snapshot_records_train.json # train-year snapshot subset
-│       │   ├── snapshot_records_val.json # validation-year snapshot subset
-│       │   ├── snapshot_records_holdout.json # holdout-year snapshot subset
-│       │   ├── scenario_parameter_records.json # full unseeded environment parameter records
-│       │   ├── scenario_parameter_records_train.json # train split unseeded records
-│       │   ├── scenario_parameter_records_val.json # validation split unseeded records
-│       │   ├── scenario_parameter_records_holdout.json # holdout split unseeded records
-│       │   ├── scenario_parameter_records_seeded.json # full seeded records with ignition/layout seeds
-│       │   ├── scenario_parameter_records_seeded_train.json # train runtime records
-│       │   ├── scenario_parameter_records_seeded_val.json # validation runtime records
-│       │   └── scenario_parameter_records_seeded_holdout.json # temporal holdout runtime records
-│       └── v2/ # optional cleaned dataset variant for retraining
-├── docs/ 
-│   ├── data-pipeline.md 
-│   ├── envspec.md 
-├── src/ 
-│   ├── __init__.py 
-│   ├── ingestion/ 
-│   │   ├── __init__.py 
+├── .github/
+│   └── workflows/
+│       └── ci.yml
+├── .ci-smoke/
+│   ├── results.json
+│   ├── scenario_parameter_records_seeded_train.json
+│   ├── scenario_parameter_records_seeded_val.json
+│   └── scenario_parameter_records_seeded_holdout.json
+├── data/
+│   └── static/
+│       ├── fp-historical-wildfire-data-2006-2025.csv # raw Alberta historical wildfire CSV
+│       ├── snapshot_records.json # full normalized snapshot records from raw CSV
+│       ├── snapshot_records_train.json # train-year snapshot subset
+│       ├── snapshot_records_val.json # validation-year snapshot subset
+│       ├── snapshot_records_holdout.json # holdout-year snapshot subset
+│       ├── scenario_parameter_records.json # full unseeded environment parameter records
+│       ├── scenario_parameter_records_train.json # train split unseeded records
+│       ├── scenario_parameter_records_val.json # validation split unseeded records
+│       ├── scenario_parameter_records_holdout.json # holdout split unseeded records
+│       ├── scenario_parameter_records_seeded.json # full seeded records with ignition/layout seeds
+│       ├── scenario_parameter_records_seeded_train.json # train runtime records
+│       ├── scenario_parameter_records_seeded_val.json # validation runtime records
+│       └── scenario_parameter_records_seeded_holdout.json # temporal holdout runtime records
+├── docs/
+│   ├── data-pipeline.md
+│   ├── envspec.md
+│   └── training.md
+├── src/
+│   ├── __init__.py
+│   ├── ingestion/
+│   │   ├── __init__.py
 │   │   ├── clean_historical.py # row cleaning and required-field checks
-│   │   ├── cffdrs.py # CFFDRS station ingestion, not used 
-│   │   ├── weather.py # legacy Open-Meteo weather fetch helpers, not used 
+│   │   ├── cffdrs.py # CFFDRS station ingestion, not used
+│   │   ├── weather.py # legacy Open-Meteo weather fetch helpers, not used
 │   │   └── static_dataset.py # builds snapshot/scenario parameter records in data/static
 │   └── models/ # environment, training, evaluation, and shared benchmark utilities
-│       ├── __init__.py 
+│       ├── __init__.py
 │       ├── fire_env.py # WildfireEnv implementation and benchmark env construction helpers
 │       ├── benchmarking.py # shared benchmark presets, rollout metrics, and aggregation functions
-│       ├── train_rl_agent.py # unified PPO/A2C/DQN trainer with checkpoint and final evaluation artifacts
+│       ├── train_rl_agent.py # unified PPO/A2C/DQN trainer with checkpoint and final evaluation outputs 
 │       └── evaluate_agents.py # classdef for PPO/A2C/DQN plus greedy/random baselines
-├── scripts/ 
+├── scripts/
+│   ├── canary.py # deterministic smoke/repro canary checks for trained artifacts
 │   ├── run_benchmark_train.sh # legacy all-in-one bash runner (staged scripts are canonical)
-│   ├── run_benchmark_train.ps1 # powershell equivalent 
+│   ├── run_benchmark_train.ps1 # powershell equivalent
 │   ├── run_benchmark_eval.sh # bash script for post-training benchmark evaluation by seed
-│   └── run_benchmark_eval.ps1 # powershell equivalent 
+│   ├── run_benchmark_eval.ps1 # powershell equivalent
 │   └── stages/
 │       ├── _common.sh # shared defaults, validation, and helper functions for staged runs
 │       ├── 01_karpathy_overfit.sh # one-record overfit checks
@@ -61,13 +84,32 @@ firebot/
 │       ├── 03_smoke_eval.sh # smoke checkpoint artifact loading + sanity eval
 │       ├── 04_pilot_sweep.sh # one-seed validation-only pilot hyperparameter sweep
 │       └── 05_final_train.sh # canonical full 5-seed training with frozen protocol
-├── tests/ 
-│   ├── conftest.py 
+├── tests/
+│   ├── conftest.py # test environment configuration 
 │   └── models/ # environment and benchmark metric contract tests
 │       ├── test_fire_env_setup_contract.py # benchmark-mode env loading/split/schema contract tests
 │       └── test_benchmarking_metrics.py # benchmark metric/preset/aggregation tests
-├── outputs/ # generated training and evaluation artifacts (gitignored)
-└── drd-archive/ # archived prototype code from the earlier DRD proposal
+├── notebooks/
+│   ├── clean_data.ipynb # used for cleaning data 
+│   ├── data_audit.ipynb # data analysis and checks on the data 
+│   ├── training_0_analysis.ipynb # first training run analysis 
+│   ├── training_1_analysis.ipynb # second training run analysis 
+│   ├── final_results_table.png
+│   ├── final_results_table_compact.png
+│   └── training_val_plots.png
+├── outputs/ # generated training and evaluation outputs (gitignored)
+└── drd-archive/ # archived prototype code from the initial RL proposal before wildfire RL evaluation 
+    ├── main.py
+    └── src/
+        ├── __init__.py
+        ├── config.py
+        ├── env.py 
+        ├── evaluate.py
+        ├── networks.py
+        ├── ppo.py
+        ├── train.py
+        ├── utils.py
+        └── viz.py
 ```
 
 ## Setup
@@ -77,7 +119,15 @@ This project requires the [uv](https://docs.astral.sh/uv/getting-started/install
 1. clone the repo
 2. in the project root, run: `uv venv && source .venv/bin/activate && uv sync`
 
-### Pre-commit hooks 
+To run the notebooks or view them using the uv virtual environment:
+
+```bash
+source .venv/bin/activate # make sure the venv is active 
+cd notebooks
+jupyter notebook 
+```
+
+### For Development: Pre-Commit Hooks 
 
 Pre-commit hooks were used for the project for linting and checks. Install [lefthook](https://github.com/evilmartians/lefthook) for local lint/format checks on commit:
 
@@ -210,8 +260,8 @@ Run from project root on Windows (PowerShell):
 
 Staged bash flow:
 
-- Stage 1: Karpathy one-record overfit checks (`ppo`, `a2c`, `dqn`)
-- Stage 2: smoke training + reproducibility canary
+- Stage 1: single-record overfit checks (`ppo`, `a2c`, `dqn`)
+- Stage 2: smoke training + reproducibility check  
 - Stage 3: smoke evaluation sanity check
 - Stage 4: validation-only pilot sweeps and winner selection
 - Stage 5: full canonical 5-seed training using frozen protocol values
