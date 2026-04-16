@@ -149,7 +149,7 @@ Termination:
 
 ---
 
-## 6) The Reward Function 
+## 6) Reward Function Design 
 
 Reward is assembled from multiple terms in `step()` and `_execute_action()`.
 
@@ -218,21 +218,21 @@ Benchmark-aligned target support:
 - `greedy`
 - `random`
 
-Transparency outputs from current code:
+Outputs:
 
 - training console output: timesteps, env count, dataset path/count, quick split metrics
 - model artifact: `tactical_ppo_agent.zip`
 - evaluation console summary per split/agent
-- optional evaluation JSON with aggregate metrics
+- evaluation JSON with aggregate metrics
 
-Required benchmark transparency outputs:
+Benchmark transparency outputs:
 
 - serialized run config per seed
 - checkpoint metrics on train/val/holdout
 - best-checkpoint selection record
 - final evaluation JSON aggregated by seed, then across seeds
 
-Recommended transparency plots (from saved eval JSON/logs):
+Transparency plots (from saved eval JSON/logs):
 
 - split-wise mean return (`train` vs `val` vs `holdout`)
 - split-wise asset survival and containment rates
@@ -241,11 +241,11 @@ Recommended transparency plots (from saved eval JSON/logs):
 
 ---
 
-## 8) Reporting Metrics
+## 8) Metrics Reported 
 
-Primary optimization target: **Minimize assets damaged/lost**
+The primary optimization target is to **minimize assets damaged/lost**. The rationale is that fires can eventually be put out, but how do we minimize the damage done during the fire suppression?
 
-Frozen benchmark metric definitions:
+Benchmark metric definitions:
 
 - mean episodic return
 - asset survival rate
@@ -257,25 +257,16 @@ Frozen benchmark metric definitions:
 - wasted deployment rate
 - mean normalized burn ratio (optional in evaluator)
 
-Important alignment notes:
-
-- pooled episode variance is not a substitute for seed-level aggregation
-- raw burned-cell count can still be logged, but the benchmark-facing metric should be the normalized burned-area fraction
-- holdout performance is for final reporting only and must not be used for tuning
-- the current temporal holdout dataset has only one unique seeded record, so it is a final diagnostic only until expanded
-
-Report these diagnostics during training checkpoints:
+We report these diagnostics during training checkpoints:
 
 - train/val gap for each metric
 - optional train/family-holdout gap for each metric
 - per-seed summary tables
 - baseline comparisons (`greedy`, `random`) against learned methods
 
-## 9) Environment-Side Requirements For Benchmark Alignment
+## 9) Environment Parameters/Fields For Benchmark 
 
-The environment and evaluator together must expose enough information to compute the benchmark metrics exactly.
-
-Environment-side counters or `info` fields required for clean evaluation:
+The environment exposes and returns the following values for benchmarking and agent evaluation:
 
 - `assets_lost`
 - `step`
@@ -286,21 +277,10 @@ Environment-side counters or `info` fields required for clean evaluation:
 - count of wasted deployment attempts
 - count of total deployment attempts
 
-Operational metric rules:
+We follow these metric rules:
 
 - `mean_resource_efficiency = successful_deployments / total_deployments`
 - if `total_deployments == 0`, report `0.0`
 - `wasted_deployment_rate = wasted_deployments / total_deployment_attempts`
 - if `total_deployment_attempts == 0`, report `0.0`
 
-Evaluator-side aggregation requirements:
-
-- aggregate per seed first, then summarize across seeds
-- compute `time_to_containment` only on contained episodes
-- compute normalized burn ratio against the same scenario record and evaluation seed under the deterministic non-intervention baseline defined in `docs/planning/train-plan.md`
-- do not surface temporal holdout metrics during checkpoint evaluation in canonical runs
-- pass `scenario_families` explicitly for canonical train, validation, and family-holdout runs rather than relying on the environment default
-
-Verification requirement before full runs:
-
-- all of the above metrics must appear in a short smoke-test evaluation artifact before any full 5-seed training sweep is launched

@@ -2,14 +2,6 @@
 
 This document describes how models are trained for the wildfire suppression environment (`WildfireEnv`) and how the benchmark pipeline is executed end to end.
 
-It reflects the current hardened setup, including:
-- cleaned-data default (`data/static/v2`)
-- one-factor-at-a-time pilot sweeps
-- explicit constant learning-rate schedule labeling
-- fail-fast non-finite metric checks during checkpoint/final eval
-
----
-
 ## 1) Environment and Agent
 
 `WildfireEnv` is a single-agent tactical wildfire suppression environment.
@@ -84,6 +76,8 @@ The benchmark process is organized into 5 stages under `scripts/stages/`.
 
 ## Stage 1/5: Karpathy one-record overfit checks
 
+This stage trains the models on a single batch and then checks whether they are overfitting to make sure that they are structurally correct.
+
 Script:
 - `scripts/stages/01_karpathy_overfit.sh`
 
@@ -100,7 +94,7 @@ Outputs:
 
 ---
 
-## Stage 2/5: Smoke training + reproducibility canary
+## Stage 2/5: Smoke training + reproducibility seed config checks 
 
 Script:
 - `scripts/stages/02_smoke_train_and_repro.sh`
@@ -139,7 +133,7 @@ Outputs:
 
 ---
 
-## Stage 4/5: Validation-only pilot sweeps
+## Stage 4/5: Hyperparameter validation sweeps
 
 Script:
 - `scripts/stages/04_pilot_sweep.sh`
@@ -213,18 +207,16 @@ Outputs:
 
 ---
 
-## 5) Hardening Controls in the Training Runner
+## 5) Additional Checks in Training Runner
 
-Implemented in `src/models/train_rl_agent.py`:
+The following is also implemented in `src/models/train_rl_agent.py` to make sure that the training does not fail:
 
 - strict split record loading (`train`, `val`, `holdout`)
 - config serialization per run (`config.json`)
 - explicit learning-rate schedule field (`learning_rate_schedule`, canonical `constant`)
 - checkpoint-by-checkpoint evaluation loop
 - fail-fast checks for malformed or non-finite metrics (`NaN`/`inf`) at checkpoint and final eval time
-- best-checkpoint selection guard requiring a valid `val` split entry
-
-This is intended to fail early on numeric instability or malformed metric artifacts.
+- whether best-checkpoint selection guard requires a valid `val` split entry
 
 ---
 
@@ -271,7 +263,7 @@ ARTIFACT_ROOT=outputs/benchmark_v2 ./scripts/run_benchmark_train.sh
 
 ---
 
-## 7) Artifact Layout
+## 7) Output Layout
 
 Default root:
 - `outputs/benchmark`

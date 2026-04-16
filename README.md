@@ -1,6 +1,6 @@
 # FireGrid
 
-Empirical RL benchmark for wildfire tactical suppression. Compares DQN, A2C, PPO, and heuristic baselines on a 25x25 grid environment with critical assets and finite suppression budgets.
+This project is an empirical RL benchmark for wildfire tactical suppression. We compare DQN, A2C, PPO, and heuristic baselines on a 25x25 grid environment with critical assets and finite suppression budgets.
 
 The physics informed environment and built environment records from the [Alberta Historical Wildfires Database](https://open.alberta.ca/opendata/wildfire-data).
 
@@ -35,10 +35,6 @@ firebot/
 ├── docs/ 
 │   ├── data-pipeline.md 
 │   ├── envspec.md 
-│   └── planning/ 
-│       ├── env-checklist.md 
-│       ├── impl-plan.md 
-│       └── train-plan.md 
 ├── src/ 
 │   ├── __init__.py 
 │   ├── ingestion/ 
@@ -76,7 +72,7 @@ firebot/
 
 ## Setup
 
-Requirements: [uv](https://docs.astral.sh/uv/getting-started/installation/) 
+This project requires the [uv](https://docs.astral.sh/uv/getting-started/installation/) package manager to run. After installing, please do the following: 
 
 1. clone the repo
 2. in the project root, run: `uv venv && source .venv/bin/activate && uv sync`
@@ -220,7 +216,7 @@ Staged bash flow:
 - Stage 4: validation-only pilot sweeps and winner selection
 - Stage 5: full canonical 5-seed training using frozen protocol values
 
-Shared staged-script environment overrides (optional):
+Optional configurable fields that can be overridden for training:
 
 - `ARTIFACT_ROOT` (default `outputs/benchmark`)
 - `SMOKE_TIMESTEPS` (default `20000`, one canonical checkpoint interval)
@@ -240,7 +236,7 @@ Shared staged-script environment overrides (optional):
 - `FINAL_SEEDS_CSV` (default `11,22,33,44,55`)
 - `ALGO_ORDER_CSV` (default `ppo,a2c,dqn`)
 
-After Stage 5 completes, run benchmark evaluation wrappers.
+After Stage 5 completes, run benchmark evaluation wrappers with the commands below.
 
 Run from project root on macOS/Linux (bash):
 

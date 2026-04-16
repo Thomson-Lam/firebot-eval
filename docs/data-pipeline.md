@@ -1,24 +1,19 @@
 # Data Pipeline
 
-This document describes the current benchmark data pipeline for building frozen `FireEnv` datasets.
+This document describes the current benchmark data pipeline for building `FireEnv` datasets.
 
-The canonical path now uses the Alberta historical wildfire dataset stored under `data/static/` as the primary source for building `FireEnv` scenario records.
+We use the Alberta historical wildfire dataset stored under `data/static/` as the primary source for building `FireEnv` scenario records. While we originally included NASA FIRMS API and CFFDRS API for ingestion of data, we removed them to not introduce bias due to the fact that not all fires have the same consistent data across all 3 sources; some environments after being made would miss CFFDRS data because there are no stations nearby where the fire occurred to sample data from.
 
 ---
 
 ## 1) Overview
 
-The benchmark pipeline has two stages:
+Our pipeline consists of two stages:
 
 1. normalize historical wildfire incidents into frozen snapshot records
 2. compute offline environment-variable records for `FireEnv`
 
-Downstream benchmark consumers should use the seeded split parameter datasets (`scenario_parameter_records_seeded_{train|val|holdout}.json`) as frozen runtime inputs.
-
-Primary source hierarchy:
-
-- primary: Alberta historical wildfire dataset
-- supplementary: CFFDRS fire-danger indices when an annual station file is available and date-matchable
+When reproducing or re-running, you should use the seeded split parameter datasets (`scenario_parameter_records_seeded_{train|val|holdout}.json`), the outputs of the data pipeline.
 
 ---
 
@@ -32,7 +27,7 @@ Raw file path:
 
 This dataset is now the default primary input to `src/ingestion/static_dataset.py`.
 
-Important fields used directly by the pipeline:
+The following fields are used directly by the pipeline:
 
 - incident identity: `YEAR`, `FIRE_NUMBER`, `FIRE_NAME`
 - location: `LATITUDE`, `LONGITUDE`
@@ -41,14 +36,6 @@ Important fields used directly by the pipeline:
 - spread/weather: `FIRE_SPREAD_RATE`, `TEMPERATURE`, `RELATIVE_HUMIDITY`, `WIND_DIRECTION`, `WIND_SPEED`, `WEATHER_CONDITIONS_OVER_FIRE`
 - fire context: `FIRE_TYPE`, `FUEL_TYPE`, `FIRE_POSITION_ON_SLOPE`, `FIRE_ORIGIN`
 - optional response context: `INITIAL_ACTION_BY`, `IA_ACCESS`, `BUCKETING_ON_FIRE`, `DISTANCE_FROM_WATER_SOURCE`
-
-Why this is now primary:
-
-- historical instead of live-only
-- provides assessment-time weather directly
-- provides observed spread rate directly
-- provides assessment-time size directly
-- removes dependence on ad hoc live weather reconstruction for canonical builds
 
 ### 2.2 `src/ingestion/cffdrs.py`
 
@@ -61,25 +48,24 @@ This module downloads annual CWFIS weather-station CSV data and parses:
 - `dmc`
 - `ffmc`
 
-Current role:
+We used this module for:
 
 - supplementary enrichment only
 - if `--cffdrs-year` is passed and usable observations exist, the builder joins the nearest station by distance, with date alignment to each fire snapshot (`max_date_offset_days=1`)
 - the benchmark does not require CFFDRS availability to build records
 - practical implication: one run fetches a single annual station file, so date-matched enrichment is usually concentrated in that selected year
 
+We did not use CFFDRS for the environment design for the final benchmark evaluation presented.
+
 ### 2.3 `src/ingestion/weather.py`
 
 This module fetches current-hour weather from Open-Meteo.
 
-Current role:
-
-- legacy / non-canonical for Alberta historical builds
-- assessment-time weather now comes directly from the Alberta dataset
+We did not use this for the environment design for the final benchmark evaluation presented. 
 
 ---
 
-## 3) Canonical Build Flow
+## 3) Build Flow of the Data Pipeline 
 
 ```text
 Alberta historical wildfire CSV
@@ -92,15 +78,11 @@ Alberta historical wildfire CSV
 -> FireEnv reset sampling
 ```
 
-This path does not use FIRMS/CWFIS or Open-Meteo in the canonical benchmark build.
-
-The builder logs cleaning and drop diagnostics directly to stdout (with progress bars if `tqdm` is available) instead of writing a separate report artifact.
-
 ### 3.1 Cleaning and vetting specification
 
-Cleaning is intentionally lightweight and is implemented in `src/ingestion/clean_historical.py`.
+Data cleaning in the data pipeline is implemented in `src/ingestion/clean_historical.py`.
 
-Row-level cleaning behavior:
+We did the following: 
 
 - strip leading/trailing whitespace from all string fields
 - convert blank strings to `null`
@@ -121,7 +103,7 @@ Row-level cleaning behavior:
 
 Normalization-time vetting in `src/ingestion/static_dataset.py` additionally drops rows that fail parsing or mapping, such as invalid datetimes, non-numeric required values, unresolved wind direction values, or years outside the frozen split strategy.
 
-### 3.2 Candidate selection and truncation behavior
+### 3.2 Candidate Fire Selection and Truncation 
 
 After normalization, candidate fires are selected in this order:
 
@@ -131,7 +113,7 @@ After normalization, candidate fires are selected in this order:
 
 This means `--target-count 100` exports up to `100` records per split, not `100` total.
 
-Current drop diagnostics printed to stdout include:
+The data pipeline outputs to `stdout`: 
 
 - total rows, kept rows, dropped rows
 - top drop reasons (for example `missing_fire_spread_rate`, `normalization_failed`)
@@ -207,7 +189,7 @@ Top-level JSON payload shape for output files:
 
 The builder computes `data/static/scenario_parameter_records.json` from each snapshot record, then writes seeded benchmark variants in `data/static/scenario_parameter_records_seeded*.json`.
 
-Canonical env-facing fields:
+Environment fields:
 
 - `base_spread_prob`
 - `severity_bucket`
@@ -216,14 +198,7 @@ Canonical env-facing fields:
 - `ignition_seed`
 - `layout_seed`
 
-Canonical integration note:
-
-- ignition family and asset layout remain simulator-side controls
-- seeded parameter records do not store explicit ignition/layout labels
-- `ignition_seed` and `layout_seed` make those simulator-side initializations reproducible
-- severity remains record-conditioned through `severity_bucket`; it is not an independently sampled family control variable
-
-Stored audit fields:
+Stored fields:
 
 - `spread_rate_1h_m`
 - `spread_score`
@@ -270,7 +245,7 @@ Benchmark runtime file contract:
 - benchmark loaders enforce split consistency from both filename hints and per-record `split` values
 - mixed-split datasets are rejected in benchmark mode
 
-Audit-only intermediates:
+Intermediates fields used only for auditing:
 
 | Stored audit field | Source fields | Purpose |
 |---|---|---|
@@ -332,20 +307,19 @@ Write outputs to a custom directory:
 uv run python -m src.ingestion.static_dataset --output-dir path/to/output --target-count 100
 ```
 
-Canonical benchmark consumers should point training/evaluation envs at seeded split files, for example:
+To use the data for benchmark, you should point training/evaluation envs at seeded split files:
 
 - `data/static/scenario_parameter_records_seeded_train.json`
 - `data/static/scenario_parameter_records_seeded_val.json`
 - `data/static/scenario_parameter_records_seeded_holdout.json`
 
+This is already set as the default in the config for the environment definition code.
+
 ---
 
-## 8) Practical Constraints
+## 8) Practical Constraints and Considerations
 
-- Alberta historical data is Alberta-only, so the canonical benchmark is currently province-scoped rather than Canada-wide.
-- CFFDRS annual station files may be sparse or unavailable for some years; the builder treats them as optional.
-- In one run, CFFDRS enrichment is sourced from a single requested annual file; historical records from other years are unlikely to date-align.
-- Canonical ingestion does not use FIRMS or CWFIS live-fire modules.
-- The benchmark still does not use terrain rasters, perimeter replay, or a full operational spread model.
+- Alberta historical data is Alberta-only, so the benchmark is currently province-scoped rather than Canada-wide.
+- CFFDRS annual station files may be sparse or unavailable for some years, so the data pipeline script treats them as optional.
+- We did not ingest FIRMS or CWFIS or CFFDRS data for live-fire modules, and used a static dataset instead.
 
-That is acceptable for the current paper because the goal is a reproducible tactical benchmark dataset, not an operational wildfire decision-support system.
